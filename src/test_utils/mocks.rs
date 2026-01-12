@@ -106,14 +106,17 @@ impl DatabaseClient for MockDatabaseClient {
         Ok(storage.get(id).cloned())
     }
 
-    async fn submit_transfer(&self, data: &SubmitTransferRequest) -> Result<TransferRequest, AppError> {
+    async fn submit_transfer(
+        &self,
+        data: &SubmitTransferRequest,
+    ) -> Result<TransferRequest, AppError> {
         self.check_should_fail()?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        
+
         // Simulating compliance check (default to Pending or Mock logic)
         let compliance_status = ComplianceStatus::Pending; // Or Approved if we want to simulate auto-approve
-        
+
         let request = TransferRequest {
             id: id.clone(),
             from_address: data.from_address.clone(),
@@ -195,7 +198,10 @@ impl DatabaseClient for MockDatabaseClient {
         Ok(())
     }
 
-    async fn get_pending_blockchain_requests(&self, limit: i64) -> Result<Vec<TransferRequest>, AppError> {
+    async fn get_pending_blockchain_requests(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<TransferRequest>, AppError> {
         self.check_should_fail()?;
         let storage = self.storage.lock().unwrap();
         let now = Utc::now();
@@ -304,12 +310,10 @@ impl BlockchainClient for MockBlockchainClient {
     async fn get_transaction_status(&self, _signature: &str) -> Result<bool, AppError> {
         self.check_should_fail()?;
         // For mock purposes, assume if it's in our list it's valid
-        // But here we store request IDs, not signatures. 
+        // But here we store request IDs, not signatures.
         // Let's simplified assumption: always true if not failing
         Ok(true)
     }
-
-
 
     async fn get_latest_blockhash(&self) -> Result<String, AppError> {
         self.check_should_fail()?;

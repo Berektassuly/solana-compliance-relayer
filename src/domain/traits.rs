@@ -97,6 +97,7 @@ mod tests {
     use super::*;
 
     // Minimal implementation for testing default methods
+    #[allow(dead_code)]
     struct MinimalDatabaseClient;
 
     #[async_trait]
@@ -105,7 +106,10 @@ mod tests {
             Ok(())
         }
 
-        async fn get_transfer_request(&self, _id: &str) -> Result<Option<TransferRequest>, AppError> {
+        async fn get_transfer_request(
+            &self,
+            _id: &str,
+        ) -> Result<Option<TransferRequest>, AppError> {
             Ok(None)
         }
 

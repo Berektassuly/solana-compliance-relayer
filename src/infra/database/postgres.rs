@@ -7,8 +7,8 @@ use std::time::Duration;
 use tracing::{info, instrument};
 
 use crate::domain::{
-    AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError,
-    PaginatedResponse, SubmitTransferRequest, TransferRequest,
+    AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, PaginatedResponse,
+    SubmitTransferRequest, TransferRequest,
 };
 
 /// PostgreSQL connection pool configuration
@@ -158,7 +158,7 @@ impl DatabaseClient for PostgresClient {
         .bind(&id)
         .bind(&data.from_address)
         .bind(&data.to_address)
-        .bind(&data.amount_sol)
+        .bind(data.amount_sol)
         .bind(ComplianceStatus::Pending.as_str())
         .bind(BlockchainStatus::Pending.as_str())
         .bind(0i32)

@@ -3,11 +3,9 @@
 //! These tests require Docker to be running and use testcontainers
 //! to spin up a real PostgreSQL instance.
 
-use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
+use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
-use solana_compliance_relayer::domain::{
-    BlockchainStatus, SubmitTransferRequest, DatabaseClient,
-};
+use solana_compliance_relayer::domain::{BlockchainStatus, DatabaseClient, SubmitTransferRequest};
 use solana_compliance_relayer::infra::{PostgresClient, PostgresConfig};
 
 /// Helper to create a PostgreSQL container and client

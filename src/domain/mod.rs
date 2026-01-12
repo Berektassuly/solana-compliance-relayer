@@ -10,7 +10,5 @@ pub use error::{
 pub use traits::{BlockchainClient, DatabaseClient};
 pub use types::{
     BlockchainStatus, ComplianceStatus, ErrorDetail, ErrorResponse, HealthResponse, HealthStatus,
-    PaginatedResponse, PaginationParams, SubmitTransferRequest, TransferRequest,
-
-    RateLimitResponse,
+    PaginatedResponse, PaginationParams, RateLimitResponse, SubmitTransferRequest, TransferRequest,
 };

@@ -17,9 +17,7 @@ use solana_compliance_relayer::api::{
 };
 use solana_compliance_relayer::app::{AppState, WorkerConfig, spawn_worker};
 use solana_compliance_relayer::infra::RpcBlockchainClient;
-use solana_compliance_relayer::infra::{
-    PostgresClient, PostgresConfig, signing_key_from_base58,
-};
+use solana_compliance_relayer::infra::{PostgresClient, PostgresConfig, signing_key_from_base58};
 
 /// Application configuration
 struct Config {

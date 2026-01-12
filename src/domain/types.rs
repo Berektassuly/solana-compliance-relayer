@@ -133,12 +133,7 @@ pub struct TransferRequest {
 
 impl TransferRequest {
     #[must_use]
-    pub fn new(
-        id: String,
-        from_address: String,
-        to_address: String,
-        amount_sol: f64,
-    ) -> Self {
+    pub fn new(id: String, from_address: String, to_address: String, amount_sol: f64) -> Self {
         let now = Utc::now();
         Self {
             id,

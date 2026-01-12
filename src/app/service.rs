@@ -6,9 +6,8 @@ use tracing::{error, info, instrument, warn};
 use validator::Validate;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainStatus, DatabaseClient,
-    HealthResponse, HealthStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest,
-    ValidationError,
+    AppError, BlockchainClient, BlockchainStatus, DatabaseClient, HealthResponse, HealthStatus,
+    PaginatedResponse, SubmitTransferRequest, TransferRequest, ValidationError,
 };
 
 /// Maximum number of retry attempts for blockchain submission
@@ -113,10 +112,7 @@ impl AppService {
 
     /// Retry blockchain submission for a specific request
     #[instrument(skip(self))]
-    pub async fn retry_blockchain_submission(
-        &self,
-        id: &str,
-    ) -> Result<TransferRequest, AppError> {
+    pub async fn retry_blockchain_submission(&self, id: &str) -> Result<TransferRequest, AppError> {
         let transfer_request = self
             .db_client
             .get_transfer_request(id)

@@ -10,7 +10,9 @@ use tower::ServiceExt;
 
 use solana_compliance_relayer::api::create_router;
 use solana_compliance_relayer::app::AppState;
-use solana_compliance_relayer::domain::{SubmitTransferRequest, TransferRequest, PaginatedResponse};
+use solana_compliance_relayer::domain::{
+    PaginatedResponse, SubmitTransferRequest, TransferRequest,
+};
 use solana_compliance_relayer::test_utils::{MockBlockchainClient, MockDatabaseClient};
 
 fn create_test_state() -> Arc<AppState> {
@@ -83,7 +85,8 @@ async fn test_full_transfer_lifecycle_flow() {
         .await
         .unwrap()
         .to_bytes();
-    let list_result: PaginatedResponse<TransferRequest> = serde_json::from_slice(&body_bytes).unwrap();
+    let list_result: PaginatedResponse<TransferRequest> =
+        serde_json::from_slice(&body_bytes).unwrap();
     assert!(list_result.items.iter().any(|i| i.id == request_id));
 }
 

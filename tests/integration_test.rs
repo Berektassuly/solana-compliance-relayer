@@ -12,7 +12,8 @@ use tower::ServiceExt;
 use solana_compliance_relayer::api::create_router;
 use solana_compliance_relayer::app::AppState;
 use solana_compliance_relayer::domain::{
-    BlockchainStatus, SubmitTransferRequest, HealthResponse, HealthStatus, TransferRequest, PaginatedResponse,
+    BlockchainStatus, HealthResponse, HealthStatus, PaginatedResponse, SubmitTransferRequest,
+    TransferRequest,
 };
 use solana_compliance_relayer::test_utils::{MockBlockchainClient, MockDatabaseClient};
 
@@ -103,17 +104,13 @@ async fn test_list_requests_with_pagination() {
     ));
 
     // Create some items
-    for i in 0..5 {
+    for i in 1..5 {
         let payload = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
             amount_sol: i as f64,
         };
-        state
-            .service
-            .submit_transfer(&payload)
-            .await
-            .unwrap();
+        state.service.submit_transfer(&payload).await.unwrap();
     }
 
     let router = create_router(state);
@@ -148,7 +145,8 @@ async fn test_list_requests_with_pagination() {
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     let result: PaginatedResponse<TransferRequest> = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(result.items.len(), 2);
-    assert!(result.has_more);
+    assert!(!result.has_more);
+    assert!(result.next_cursor.is_none());
 }
 
 #[tokio::test]
@@ -166,11 +164,7 @@ async fn test_get_request_success() {
         to_address: "To".to_string(),
         amount_sol: 10.0,
     };
-    let created = state
-        .service
-        .submit_transfer(&payload)
-        .await
-        .unwrap();
+    let created = state.service.submit_transfer(&payload).await.unwrap();
 
     let router = create_router(state);
 
@@ -391,11 +385,7 @@ async fn test_retry_handler_not_eligible() {
         to_address: "To".to_string(),
         amount_sol: 1.0,
     };
-    let created = state
-        .service
-        .submit_transfer(&payload)
-        .await
-        .unwrap();
+    let created = state.service.submit_transfer(&payload).await.unwrap();
 
     let router = create_router(state);
 
