@@ -1,0 +1,67 @@
+[package]
+name = "solana-compliance-relayer"
+version = "0.1.0"
+edition = "2024"
+description = "A production-ready Rust template demonstrating testable architecture"
+license = "MIT"
+
+[features]
+default = []
+test-utils = []
+real-blockchain = []
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1.48", features = ["full", "signal"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "migrate",
+    "macros",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+async-trait = "0.1"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
+bs58 = "0.5"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+validator = { version = "0.19", features = ["derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OpenAPI documentation
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Rate limiting  
+governor = "0.8"
+
+[dev-dependencies]
+solana-compliance-relayer = { path = ".", features = ["test-utils"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tokio-test = "0.4"
+testcontainers = "0.26"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "domain_benchmarks"
+harness = false
+
+
+[lib]
+name = "solana_compliance_relayer"
+path = "src/lib.rs"

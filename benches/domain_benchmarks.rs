@@ -1,0 +1,20 @@
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use solana_compliance_relayer::domain::SubmitTransferRequest;
+use validator::Validate;
+
+fn bench_validation(c: &mut Criterion) {
+    let request = SubmitTransferRequest {
+        from_address: "AddressA".to_string(),
+        to_address: "AddressB".to_string(),
+        amount_sol: 10.5,
+    };
+
+    c.bench_function("validate_transfer_request", |b| {
+        b.iter(|| {
+            let _ = black_box(&request).validate();
+        })
+    });
+}
+
+criterion_group!(benches, bench_validation);
+criterion_main!(benches);

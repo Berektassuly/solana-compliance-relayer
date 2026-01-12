@@ -1,0 +1,23 @@
+[build]
+# Use all available CPU cores for compilation
+jobs = -1
+
+[target.x86_64-unknown-linux-gnu]
+# Use mold linker if available (faster linking)
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[alias]
+# Useful aliases
+t = "test"
+c = "check"
+b = "build"
+r = "run"
+br = "build --release"
+rr = "run --release"
+lint = "clippy -- -D warnings"
+fmt-check = "fmt --check"
+
+[env]
+# Default environment for development
+RUST_BACKTRACE = "1"
