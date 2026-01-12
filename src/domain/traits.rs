@@ -3,8 +3,20 @@
 use async_trait::async_trait;
 
 use super::error::AppError;
-use super::types::{BlockchainStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest};
+use super::types::{
+    BlockchainStatus, ComplianceStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest,
+};
 use chrono::{DateTime, Utc};
+
+/// Compliance provider trait for screening requests
+#[async_trait]
+pub trait ComplianceProvider: Send + Sync {
+    /// Check if a transfer request is compliant
+    async fn check_compliance(
+        &self,
+        request: &SubmitTransferRequest,
+    ) -> Result<ComplianceStatus, AppError>;
+}
 
 /// Database client trait for persistence operations
 #[async_trait]
@@ -36,6 +48,13 @@ pub trait DatabaseClient: Send + Sync {
         signature: Option<&str>,
         error: Option<&str>,
         next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<(), AppError>;
+
+    /// Update compliance status for a transfer request
+    async fn update_compliance_status(
+        &self,
+        id: &str,
+        status: crate::domain::ComplianceStatus,
     ) -> Result<(), AppError>;
 
     /// Get requests pending blockchain submission
@@ -135,6 +154,14 @@ mod tests {
             _signature: Option<&str>,
             _error: Option<&str>,
             _next_retry_at: Option<DateTime<Utc>>,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn update_compliance_status(
+            &self,
+            _id: &str,
+            _status: crate::domain::ComplianceStatus,
         ) -> Result<(), AppError> {
             Ok(())
         }

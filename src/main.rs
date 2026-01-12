@@ -148,10 +148,15 @@ async fn main() -> Result<()> {
         RpcBlockchainClient::with_defaults(&config.blockchain_rpc_url, config.signing_key)?;
     info!("   ✓ Blockchain client created");
 
+    // Initialize compliance provider
+    let compliance_provider = solana_compliance_relayer::infra::RangeComplianceProvider::new();
+    info!("   ✓ Compliance provider created");
+
     // Create application state
     let app_state = Arc::new(AppState::new(
         Arc::new(postgres_client),
         Arc::new(blockchain_client),
+        Arc::new(compliance_provider),
     ));
 
     // Start background worker if enabled

@@ -198,6 +198,20 @@ impl DatabaseClient for MockDatabaseClient {
         Ok(())
     }
 
+    async fn update_compliance_status(
+        &self,
+        id: &str,
+        status: ComplianceStatus,
+    ) -> Result<(), AppError> {
+        self.check_should_fail()?;
+        let mut storage = self.storage.lock().unwrap();
+        if let Some(item) = storage.get_mut(id) {
+            item.compliance_status = status;
+            item.updated_at = Utc::now();
+        }
+        Ok(())
+    }
+
     async fn get_pending_blockchain_requests(
         &self,
         limit: i64,
@@ -318,5 +332,49 @@ impl BlockchainClient for MockBlockchainClient {
     async fn get_latest_blockhash(&self) -> Result<String, AppError> {
         self.check_should_fail()?;
         Ok("mock_blockhash_abc123".to_string())
+    }
+}
+
+/// Mock compliance provider for testing
+pub struct MockComplianceProvider {
+    config: MockConfig,
+}
+
+impl MockComplianceProvider {
+    pub fn new() -> Self {
+        Self {
+            config: MockConfig::success(),
+        }
+    }
+
+    pub fn failing(message: impl Into<String>) -> Self {
+        Self {
+            config: MockConfig::failure(message),
+        }
+    }
+}
+
+impl Default for MockComplianceProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl crate::domain::ComplianceProvider for MockComplianceProvider {
+    async fn check_compliance(
+        &self,
+        _request: &SubmitTransferRequest,
+    ) -> Result<ComplianceStatus, AppError> {
+        if self.config.should_fail {
+            return Err(AppError::ExternalService(
+                crate::domain::ExternalServiceError::RequestFailed(
+                    self.config.error_message.clone().unwrap_or_default(),
+                ),
+            ));
+        }
+        // Default to approved for mocks unless we specifically want to test rejection logic
+        // We can extend this mock later if needed for specific test cases
+        Ok(ComplianceStatus::Approved)
     }
 }

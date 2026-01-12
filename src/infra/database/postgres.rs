@@ -305,6 +305,31 @@ impl DatabaseClient for PostgresClient {
     }
 
     #[instrument(skip(self))]
+    async fn update_compliance_status(
+        &self,
+        id: &str,
+        status: ComplianceStatus,
+    ) -> Result<(), AppError> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            UPDATE transfer_requests 
+            SET compliance_status = $1,
+                updated_at = $2
+            WHERE id = $3
+            "#,
+        )
+        .bind(status.as_str())
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
     async fn get_pending_blockchain_requests(
         &self,
         limit: i64,

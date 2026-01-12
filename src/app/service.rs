@@ -20,6 +20,7 @@ const MAX_BACKOFF_SECS: i64 = 300;
 pub struct AppService {
     db_client: Arc<dyn DatabaseClient>,
     blockchain_client: Arc<dyn BlockchainClient>,
+    compliance_provider: Arc<dyn crate::domain::ComplianceProvider>,
 }
 
 impl AppService {
@@ -27,10 +28,12 @@ impl AppService {
     pub fn new(
         db_client: Arc<dyn DatabaseClient>,
         blockchain_client: Arc<dyn BlockchainClient>,
+        compliance_provider: Arc<dyn crate::domain::ComplianceProvider>,
     ) -> Self {
         Self {
             db_client,
             blockchain_client,
+            compliance_provider,
         }
     }
 
@@ -47,7 +50,35 @@ impl AppService {
         })?;
 
         info!("Submitting new transfer request");
+
+        // Compliance check
+        let compliance_status = self.compliance_provider.check_compliance(request).await?;
+        if compliance_status == crate::domain::ComplianceStatus::Rejected {
+            warn!(from = %request.from_address, to = %request.to_address, "Transfer rejected by compliance provider");
+        }
+
         let mut transfer_request = self.db_client.submit_transfer(request).await?;
+
+        if compliance_status != crate::domain::ComplianceStatus::Pending {
+            self.db_client
+                .update_compliance_status(&transfer_request.id, compliance_status)
+                .await?;
+        }
+
+        transfer_request.compliance_status = compliance_status;
+
+        // If rejected, stop here.
+        if compliance_status == crate::domain::ComplianceStatus::Rejected {
+            return Ok(transfer_request);
+        }
+
+        transfer_request.compliance_status = compliance_status;
+
+        // If rejected, we likely need to return early.
+        if compliance_status == crate::domain::ComplianceStatus::Rejected {
+            return Ok(transfer_request);
+        }
+
         info!(id = %transfer_request.id, "Transfer request created in database");
 
         // Attempt blockchain submission with graceful degradation

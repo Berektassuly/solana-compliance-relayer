@@ -15,12 +15,15 @@ use solana_compliance_relayer::domain::{
     BlockchainStatus, HealthResponse, HealthStatus, PaginatedResponse, SubmitTransferRequest,
     TransferRequest,
 };
-use solana_compliance_relayer::test_utils::{MockBlockchainClient, MockDatabaseClient};
+use solana_compliance_relayer::test_utils::{
+    MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
+};
 
 fn create_test_state() -> Arc<AppState> {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
-    Arc::new(AppState::new(db as _, blockchain as _))
+    let compliance = Arc::new(MockComplianceProvider::new());
+    Arc::new(AppState::new(db as _, blockchain as _, compliance as _))
 }
 
 #[tokio::test]
@@ -98,9 +101,11 @@ async fn test_list_requests_empty() {
 async fn test_list_requests_with_pagination() {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
+    let compliance = Arc::new(MockComplianceProvider::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&db) as _,
         Arc::clone(&blockchain) as _,
+        Arc::clone(&compliance) as _,
     ));
 
     // Create some items
@@ -153,9 +158,11 @@ async fn test_list_requests_with_pagination() {
 async fn test_get_request_success() {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
+    let compliance = Arc::new(MockComplianceProvider::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&db) as _,
         Arc::clone(&blockchain) as _,
+        Arc::clone(&compliance) as _,
     ));
 
     // Create an item
@@ -201,7 +208,8 @@ async fn test_get_request_not_found() {
 async fn test_graceful_degradation_blockchain_failure() {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::failing("RPC error"));
-    let state = Arc::new(AppState::new(Arc::clone(&db) as _, blockchain));
+    let compliance = Arc::new(MockComplianceProvider::new());
+    let state = Arc::new(AppState::new(Arc::clone(&db) as _, blockchain, compliance));
     let router = create_router(state);
 
     let payload = SubmitTransferRequest {
@@ -282,7 +290,8 @@ async fn test_readiness_unhealthy() {
     let db = Arc::new(MockDatabaseClient::new());
     db.set_healthy(false);
     let blockchain = Arc::new(MockBlockchainClient::new());
-    let state = Arc::new(AppState::new(db, blockchain));
+    let compliance = Arc::new(MockComplianceProvider::new());
+    let state = Arc::new(AppState::new(db, blockchain, compliance));
     let router = create_router(state);
 
     let request = Request::builder()
@@ -299,7 +308,8 @@ async fn test_readiness_unhealthy() {
 async fn test_database_failure() {
     let db = Arc::new(MockDatabaseClient::failing("DB error"));
     let blockchain = Arc::new(MockBlockchainClient::new());
-    let state = Arc::new(AppState::new(db, blockchain));
+    let compliance = Arc::new(MockComplianceProvider::new());
+    let state = Arc::new(AppState::new(db, blockchain, compliance));
     let router = create_router(state);
 
     let payload = SubmitTransferRequest {
@@ -374,9 +384,11 @@ async fn test_retry_handler_item_not_found() {
 async fn test_retry_handler_not_eligible() {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
+    let compliance = Arc::new(MockComplianceProvider::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&db) as _,
         Arc::clone(&blockchain) as _,
+        Arc::clone(&compliance) as _,
     ));
 
     // Create an item with Submitted status (not eligible for retry)
@@ -437,7 +449,8 @@ async fn test_health_check_degraded() {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
     blockchain.set_healthy(false);
-    let state = Arc::new(AppState::new(db, blockchain));
+    let compliance = Arc::new(MockComplianceProvider::new());
+    let state = Arc::new(AppState::new(db, blockchain, compliance));
     let router = create_router(state);
 
     let request = Request::builder()
