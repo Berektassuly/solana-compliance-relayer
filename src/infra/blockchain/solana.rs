@@ -396,7 +396,7 @@ impl RpcBlockchainClient {
         // - Recent blockhash (32 bytes)
         // - Instruction count (compact-u16) + instructions
 
-        let mut message = Vec::new();
+        let mut message = vec![1u8, 0u8, 1u8];
 
         // Message header
         message.push(1u8); // num_required_signatures: 1 (sender)

@@ -126,7 +126,9 @@ pub fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BlockchainStatus, ComplianceStatus, DatabaseClient, SubmitTransferRequest};
+    use crate::domain::{
+        BlockchainStatus, ComplianceStatus, DatabaseClient, SubmitTransferRequest,
+    };
     use crate::test_utils::{
         MockBlockchainClient, MockComplianceProvider, MockConfig, MockDatabaseClient,
     };
