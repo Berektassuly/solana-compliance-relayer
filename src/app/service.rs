@@ -6,8 +6,8 @@ use tracing::{error, info, instrument, warn};
 use validator::Validate;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainStatus, DatabaseClient, HealthResponse, HealthStatus,
-    PaginatedResponse, SubmitTransferRequest, TransferRequest, ValidationError,
+    AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
+    HealthStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest, ValidationError,
 };
 
 /// Maximum number of retry attempts for blockchain submission
@@ -232,9 +232,20 @@ impl AppService {
 
     /// Process a single pending submission
     async fn process_single_submission(&self, request: &TransferRequest) -> Result<(), AppError> {
-        match self.blockchain_client.submit_transaction(request).await {
+        // Defense in depth: Skip non-approved requests (should be filtered at DB level already)
+        if request.compliance_status != ComplianceStatus::Approved {
+            warn!(id = %request.id, status = ?request.compliance_status, "Skipping non-approved request");
+            return Ok(());
+        }
+
+        // Use transfer_sol for actual SOL transfers
+        match self
+            .blockchain_client
+            .transfer_sol(&request.to_address, request.amount_sol)
+            .await
+        {
             Ok(signature) => {
-                info!(id = %request.id, signature = %signature, "Background submission successful");
+                info!(id = %request.id, signature = %signature, "SOL transfer successful");
                 self.db_client
                     .update_blockchain_status(
                         &request.id,
@@ -246,7 +257,7 @@ impl AppService {
                     .await?;
             }
             Err(e) => {
-                warn!(id = %request.id, error = ?e, "Background submission failed");
+                warn!(id = %request.id, error = ?e, "SOL transfer failed");
                 let retry_count = self.db_client.increment_retry_count(&request.id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)

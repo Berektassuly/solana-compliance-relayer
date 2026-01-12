@@ -223,6 +223,7 @@ impl DatabaseClient for MockDatabaseClient {
             .values()
             .filter(|i| {
                 i.blockchain_status == BlockchainStatus::PendingSubmission
+                    && i.compliance_status == ComplianceStatus::Approved
                     && i.blockchain_retry_count < 10
                     && i.blockchain_next_retry_at.map(|t| t <= now).unwrap_or(true)
             })
@@ -332,6 +333,20 @@ impl BlockchainClient for MockBlockchainClient {
     async fn get_latest_blockhash(&self) -> Result<String, AppError> {
         self.check_should_fail()?;
         Ok("mock_blockhash_abc123".to_string())
+    }
+
+    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
+        self.check_should_fail()?;
+        // Convert to lamports for the signature generation
+        let lamports = (amount_sol * 1_000_000_000.0) as u64;
+        let signature = format!(
+            "transfer_sig_{}_{}",
+            &to_address[..8.min(to_address.len())],
+            lamports
+        );
+        let mut transactions = self.transactions.lock().unwrap();
+        transactions.push(format!("transfer:{}:{}", to_address, lamports));
+        Ok(signature)
     }
 }
 

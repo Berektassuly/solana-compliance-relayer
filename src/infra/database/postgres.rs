@@ -343,6 +343,7 @@ impl DatabaseClient for PostgresClient {
                    created_at, updated_at
             FROM transfer_requests
             WHERE blockchain_status = 'pending_submission'
+              AND compliance_status = 'approved'
               AND (blockchain_next_retry_at IS NULL OR blockchain_next_retry_at <= $1)
               AND blockchain_retry_count < 10
             ORDER BY blockchain_next_retry_at ASC NULLS FIRST, created_at ASC

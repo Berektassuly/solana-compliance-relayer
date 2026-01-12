@@ -126,7 +126,7 @@ pub fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BlockchainStatus, DatabaseClient, SubmitTransferRequest};
+    use crate::domain::{BlockchainStatus, ComplianceStatus, DatabaseClient, SubmitTransferRequest};
     use crate::test_utils::{
         MockBlockchainClient, MockComplianceProvider, MockConfig, MockDatabaseClient,
     };
@@ -470,6 +470,11 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // Set compliance status to Approved (required for worker to process)
+        db.update_compliance_status(&tr.id, ComplianceStatus::Approved)
+            .await
+            .unwrap();
 
         let cp = Arc::new(MockComplianceProvider::new());
         let service = Arc::new(AppService::new(db.clone() as _, bc as _, cp as _));

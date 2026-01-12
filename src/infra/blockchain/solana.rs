@@ -4,6 +4,7 @@
 //! Real blockchain functionality is enabled with the `real-blockchain` feature.
 
 use async_trait::async_trait;
+use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
@@ -334,6 +335,123 @@ impl RpcBlockchainClient {
 
         Ok(bs58::encode(&final_tx).into_string())
     }
+
+    /// Build and serialize a System Program transfer transaction
+    /// Uses manual byte construction for the "Hardcore" approach
+    fn build_transfer_transaction(
+        &self,
+        to_address: &str,
+        lamports: u64,
+        recent_blockhash: &str,
+    ) -> Result<String, AppError> {
+        // System Program ID: 11111111111111111111111111111111 (all ones = all zeros in bytes)
+        let system_program_id = [0u8; 32];
+
+        // Decode destination address
+        let to_pubkey_bytes = bs58::decode(to_address).into_vec().map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Invalid destination address: {}",
+                e
+            )))
+        })?;
+
+        if to_pubkey_bytes.len() != 32 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                format!(
+                    "Destination address must be 32 bytes, got {}",
+                    to_pubkey_bytes.len()
+                ),
+            )));
+        }
+
+        // Decode recent blockhash
+        let recent_blockhash_bytes = bs58::decode(recent_blockhash)
+            .into_vec()
+            .map_err(|e| AppError::Blockchain(BlockchainError::InvalidSignature(e.to_string())))?;
+
+        if recent_blockhash_bytes.len() != 32 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                format!(
+                    "Blockhash must be 32 bytes, got {}",
+                    recent_blockhash_bytes.len()
+                ),
+            )));
+        }
+
+        // Get sender public key
+        let from_pubkey_bytes: Vec<u8> = bs58::decode(self.provider.public_key())
+            .into_vec()
+            .map_err(|e| AppError::Blockchain(BlockchainError::InvalidSignature(e.to_string())))?;
+
+        // Build the instruction data for System Program Transfer
+        // Instruction index 2 = Transfer, followed by lamports (u64 LE)
+        let mut instruction_data = Vec::with_capacity(12);
+        instruction_data.extend_from_slice(&2u32.to_le_bytes()); // Transfer instruction = 2
+        instruction_data.extend_from_slice(&lamports.to_le_bytes()); // Amount in lamports
+
+        // Build the message (without signatures)
+        // Message format:
+        // - Header: [num_required_signatures, num_readonly_signed, num_readonly_unsigned]
+        // - Account keys count (compact-u16) + account keys
+        // - Recent blockhash (32 bytes)
+        // - Instruction count (compact-u16) + instructions
+
+        let mut message = Vec::new();
+
+        // Message header
+        message.push(1u8); // num_required_signatures: 1 (sender)
+        message.push(0u8); // num_readonly_signed_accounts: 0
+        message.push(1u8); // num_readonly_unsigned_accounts: 1 (system program)
+
+        // Account keys (3 accounts: sender, recipient, system program)
+        // Compact-u16 encoding: for values < 128, it's just the byte
+        message.push(3u8); // 3 accounts
+
+        // Account 0: Sender (signer, writable)
+        message.extend_from_slice(&from_pubkey_bytes);
+        // Account 1: Recipient (writable, not signer)
+        message.extend_from_slice(&to_pubkey_bytes);
+        // Account 2: System Program (readonly)
+        message.extend_from_slice(&system_program_id);
+
+        // Recent blockhash
+        message.extend_from_slice(&recent_blockhash_bytes);
+
+        // Instructions (1 instruction)
+        message.push(1u8); // 1 instruction
+
+        // Instruction format:
+        // - program_id_index (u8)
+        // - accounts length (compact-u16) + account indices
+        // - data length (compact-u16) + data
+
+        message.push(2u8); // program_id_index: 2 (system program)
+
+        // Account indices for the transfer instruction
+        message.push(2u8); // 2 accounts referenced
+        message.push(0u8); // Account 0: sender (source)
+        message.push(1u8); // Account 1: recipient (destination)
+
+        // Instruction data
+        message.push(instruction_data.len() as u8); // data length
+        message.extend_from_slice(&instruction_data);
+
+        // Sign the message
+        let signature_str = self.provider.sign(&message);
+        let signature_bytes = bs58::decode(&signature_str)
+            .into_vec()
+            .map_err(|e| AppError::Blockchain(BlockchainError::InvalidSignature(e.to_string())))?;
+
+        // Build the final transaction
+        // Transaction format: [signature_count, signatures..., message...]
+        let mut transaction = Vec::new();
+        transaction.push(1u8); // 1 signature
+        transaction.extend_from_slice(&signature_bytes);
+        transaction.extend_from_slice(&message);
+
+        // Return as base64 (preferred for sendTransaction)
+        Ok(base64::engine::general_purpose::STANDARD.encode(&transaction))
+    }
 }
 
 #[async_trait]
@@ -446,6 +564,37 @@ impl BlockchainClient for RpcBlockchainClient {
             "Transaction {} not confirmed within {}s",
             signature, timeout_secs
         ))))
+    }
+
+    #[instrument(skip(self))]
+    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
+        // Convert SOL to lamports (1 SOL = 1_000_000_000 lamports)
+        let lamports = (amount_sol * 1_000_000_000.0) as u64;
+
+        info!(to = %to_address, amount_sol = %amount_sol, lamports = %lamports, "Transferring SOL");
+
+        // Validate amount
+        if lamports == 0 {
+            return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
+                "Transfer amount must be greater than 0".to_string(),
+            )));
+        }
+
+        // Get recent blockhash
+        let blockhash = self.get_latest_blockhash().await?;
+        debug!(blockhash = %blockhash, "Got recent blockhash for transfer");
+
+        // Build the transfer transaction
+        let tx = self.build_transfer_transaction(to_address, lamports, &blockhash)?;
+        debug!("Built transfer transaction");
+
+        // Send the transaction using base64 encoding
+        let params = serde_json::json!([tx, {"encoding": "base64"}]);
+        let signature: String = self.rpc_call("sendTransaction", params).await?;
+
+        info!(signature = %signature, to = %to_address, lamports = %lamports, "SOL transfer submitted");
+
+        Ok(signature)
     }
 }
 

@@ -109,6 +109,15 @@ pub trait BlockchainClient: Send + Sync {
             "wait_for_confirmation not implemented".to_string(),
         ))
     }
+
+    /// Transfer SOL from the issuer wallet to a destination address
+    /// Returns the transaction signature on success
+    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
+        let _ = (to_address, amount_sol);
+        Err(AppError::NotSupported(
+            "transfer_sol not implemented".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
