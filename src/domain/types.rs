@@ -103,14 +103,14 @@ pub struct TransferRequest {
     /// Unique identifier (UUID)
     #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
     pub id: String,
-    /// Sender wallet address
-    #[schema(example = "HereWalletAddressBase58")]
+    /// Sender wallet address (Base58 Solana address)
+    #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
     pub from_address: String,
-    /// Recipient wallet address
-    #[schema(example = "ThereWalletAddressBase58")]
+    /// Recipient wallet address (Base58 Solana address)
+    #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
     /// Amount of SOL to transfer
-    #[schema(example = 1.5)]
+    #[schema(example = 0.5)]
     pub amount_sol: f64,
     /// Compliance check status
     pub compliance_status: ComplianceStatus,
@@ -166,17 +166,17 @@ impl Default for TransferRequest {
 /// Request to submit a new transfer
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, ToSchema)]
 pub struct SubmitTransferRequest {
-    /// Sender wallet address
+    /// Sender wallet address (Base58 Solana address)
     #[validate(length(min = 1, message = "From address is required"))]
-    #[schema(example = "SenderBase58Address")]
+    #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
     pub from_address: String,
-    /// Recipient wallet address
+    /// Recipient wallet address (Base58 Solana address)
     #[validate(length(min = 1, message = "To address is required"))]
-    #[schema(example = "RecipientBase58Address")]
+    #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
     /// Amount of SOL to transfer
     #[validate(range(min = 0.000000001, message = "Amount must be greater than 0"))]
-    #[schema(example = 1.5)]
+    #[schema(example = 0.5)]
     pub amount_sol: f64,
 }
 

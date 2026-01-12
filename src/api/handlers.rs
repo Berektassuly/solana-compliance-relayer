@@ -65,14 +65,17 @@ use crate::domain::{
 pub struct ApiDoc;
 
 /// Submit a new transfer request
+///
+/// Submits a transfer for compliance screening. If the recipient address
+/// is flagged by the compliance provider, the transfer will be rejected.
 #[utoipa::path(
     post,
     path = "/transfer-requests",
     tag = "transfers",
     request_body = SubmitTransferRequest,
     responses(
-        (status = 200, description = "Transfer request submitted successfully", body = TransferRequest),
-        (status = 400, description = "Validation error", body = ErrorResponse),
+        (status = 200, description = "Transfer request accepted (check compliance_status for approval)", body = TransferRequest),
+        (status = 400, description = "Validation error - invalid request format", body = ErrorResponse),
         (status = 429, description = "Rate limit exceeded", body = RateLimitResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse)

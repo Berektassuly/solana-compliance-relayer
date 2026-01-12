@@ -208,7 +208,14 @@ async fn test_get_pending_blockchain_requests() {
         if i == 0 {
             // Leave as pending
         } else if i == 1 {
-            // Set to pending_submission
+            // Set to pending_submission AND approved (query requires both)
+            client
+                .update_compliance_status(
+                    &item.id,
+                    solana_compliance_relayer::domain::ComplianceStatus::Approved,
+                )
+                .await
+                .expect("Failed to update compliance status");
             client
                 .update_blockchain_status(
                     &item.id,
