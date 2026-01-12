@@ -273,12 +273,13 @@ mod tests {
 
     use super::*;
 
-    use crate::test_utils::{MockBlockchainClient, MockDatabaseClient};
+    use crate::test_utils::{MockBlockchainClient, MockComplianceProvider, MockDatabaseClient};
 
     fn create_test_state() -> Arc<AppState> {
         let db = Arc::new(MockDatabaseClient::new());
         let bc = Arc::new(MockBlockchainClient::new());
-        Arc::new(AppState::new(db as _, bc as _))
+        let cp = Arc::new(MockComplianceProvider::new());
+        Arc::new(AppState::new(db as _, bc as _, cp as _))
     }
 
     mod rate_limit_config_tests {

@@ -127,12 +127,15 @@ pub fn spawn_worker(
 mod tests {
     use super::*;
     use crate::domain::{BlockchainStatus, DatabaseClient, SubmitTransferRequest};
-    use crate::test_utils::{MockBlockchainClient, MockConfig, MockDatabaseClient};
+    use crate::test_utils::{
+        MockBlockchainClient, MockComplianceProvider, MockConfig, MockDatabaseClient,
+    };
 
     fn create_test_service() -> Arc<AppService> {
         let db = Arc::new(MockDatabaseClient::new());
         let bc = Arc::new(MockBlockchainClient::new());
-        Arc::new(AppService::new(db as _, bc as _))
+        let cp = Arc::new(MockComplianceProvider::new());
+        Arc::new(AppService::new(db as _, bc as _, cp as _))
     }
 
     #[test]
@@ -330,7 +333,8 @@ mod tests {
             "Database error",
         )));
         let bc = Arc::new(MockBlockchainClient::new());
-        let service = Arc::new(AppService::new(db as _, bc as _));
+        let cp = Arc::new(MockComplianceProvider::new());
+        let service = Arc::new(AppService::new(db as _, bc as _, cp as _));
 
         let config = WorkerConfig {
             poll_interval: Duration::from_secs(10),
@@ -467,7 +471,8 @@ mod tests {
         .await
         .unwrap();
 
-        let service = Arc::new(AppService::new(db.clone() as _, bc as _));
+        let cp = Arc::new(MockComplianceProvider::new());
+        let service = Arc::new(AppService::new(db.clone() as _, bc as _, cp as _));
 
         let config = WorkerConfig {
             poll_interval: Duration::from_secs(10),

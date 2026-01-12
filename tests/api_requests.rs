@@ -13,12 +13,15 @@ use solana_compliance_relayer::app::AppState;
 use solana_compliance_relayer::domain::{
     PaginatedResponse, SubmitTransferRequest, TransferRequest,
 };
-use solana_compliance_relayer::test_utils::{MockBlockchainClient, MockDatabaseClient};
+use solana_compliance_relayer::test_utils::{
+    MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
+};
 
 fn create_test_state() -> Arc<AppState> {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
-    Arc::new(AppState::new(db as _, blockchain as _))
+    let compliance = Arc::new(MockComplianceProvider::new());
+    Arc::new(AppState::new(db as _, blockchain as _, compliance as _))
 }
 
 #[tokio::test]

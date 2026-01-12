@@ -368,7 +368,7 @@ impl crate::domain::ComplianceProvider for MockComplianceProvider {
     ) -> Result<ComplianceStatus, AppError> {
         if self.config.should_fail {
             return Err(AppError::ExternalService(
-                crate::domain::ExternalServiceError::RequestFailed(
+                crate::domain::ExternalServiceError::HttpError(
                     self.config.error_message.clone().unwrap_or_default(),
                 ),
             ));
