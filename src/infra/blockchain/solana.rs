@@ -23,7 +23,8 @@ use solana_sdk::{
 };
 use solana_system_interface::instruction as system_instruction;
 use spl_associated_token_account::{
-    get_associated_token_address, instruction::create_associated_token_account,
+    get_associated_token_address_with_program_id,
+    instruction::create_associated_token_account_idempotent,
 };
 use spl_token_interface::instruction as token_instruction;
 
@@ -714,13 +715,35 @@ impl BlockchainClient for RpcBlockchainClient {
             )))
         })?;
 
-        // Derive Associated Token Accounts
-        let source_ata = get_associated_token_address(&keypair.pubkey(), &mint_pubkey);
-        let destination_ata = get_associated_token_address(&to_pubkey, &mint_pubkey);
+        // Fetch the mint account to determine the correct token program ID
+        // This handles both legacy SPL Token and Token-2022
+        let mint_account = sdk_client.get_account(&mint_pubkey).await.map_err(|e| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                "Failed to fetch mint account: {}",
+                e
+            )))
+        })?;
+
+        // The mint account's owner is the token program ID
+        let token_program_id = mint_account.owner;
+        debug!(token_program_id = %token_program_id, "Detected token program from mint");
+
+        // Derive Associated Token Accounts with the correct token program ID
+        let source_ata = get_associated_token_address_with_program_id(
+            &keypair.pubkey(),
+            &mint_pubkey,
+            &token_program_id,
+        );
+        let destination_ata = get_associated_token_address_with_program_id(
+            &to_pubkey,
+            &mint_pubkey,
+            &token_program_id,
+        );
 
         debug!(
             source_ata = %source_ata,
             destination_ata = %destination_ata,
+            token_program_id = %token_program_id,
             "Derived ATAs for token transfer"
         );
 
@@ -730,20 +753,21 @@ impl BlockchainClient for RpcBlockchainClient {
         let dest_account_result = sdk_client.get_account(&destination_ata).await;
 
         if dest_account_result.is_err() {
-            // ATA doesn't exist - create it
+            // ATA doesn't exist - create it using idempotent instruction
+            // This is safer as it won't fail if the ATA gets created between our check and execution
             info!(destination_ata = %destination_ata, "Creating destination ATA");
-            let create_ata_ix = create_associated_token_account(
+            let create_ata_ix = create_associated_token_account_idempotent(
                 &keypair.pubkey(), // payer
                 &to_pubkey,        // wallet owner
                 &mint_pubkey,      // token mint
-                &spl_token::id(),  // token program
+                &token_program_id, // token program (dynamically detected)
             );
             instructions.push(create_ata_ix);
         }
 
-        // Create SPL Token transfer instruction
+        // Create SPL Token transfer instruction using the correct token program
         let transfer_ix = token_instruction::transfer(
-            &spl_token::id(),
+            &token_program_id,
             &source_ata,
             &destination_ata,
             &keypair.pubkey(),
