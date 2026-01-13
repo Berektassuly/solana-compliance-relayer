@@ -12,6 +12,21 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use tracing::{debug, info, instrument, warn};
 
+// Solana SDK imports (v3.0)
+use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use solana_commitment_config::CommitmentConfig;
+use solana_sdk::{
+    instruction::Instruction,
+    pubkey::Pubkey,
+    signer::{Signer as SolanaSigner, keypair::Keypair},
+    transaction::Transaction,
+};
+use solana_system_interface::instruction as system_instruction;
+use spl_associated_token_account::{
+    get_associated_token_address, instruction::create_associated_token_account,
+};
+use spl_token_interface::instruction as token_instruction;
+
 use crate::domain::{AppError, BlockchainClient, BlockchainError, TransferRequest};
 
 /// Configuration for the RPC client
@@ -140,6 +155,10 @@ impl SolanaRpcProvider for HttpSolanaRpcProvider {
 pub struct RpcBlockchainClient {
     provider: Box<dyn SolanaRpcProvider>,
     config: RpcClientConfig,
+    /// Solana SDK RPC client for SDK-based operations
+    sdk_client: Option<SolanaRpcClient>,
+    /// Solana keypair for signing transactions
+    keypair: Option<Keypair>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,11 +210,30 @@ impl RpcBlockchainClient {
         signing_key: SigningKey,
         config: RpcClientConfig,
     ) -> Result<Self, AppError> {
-        let provider = HttpSolanaRpcProvider::new(rpc_url, signing_key, config.timeout)?;
-        info!(rpc_url = %rpc_url, "Created blockchain client");
+        let provider = HttpSolanaRpcProvider::new(rpc_url, signing_key.clone(), config.timeout)?;
+
+        // Create Solana SDK keypair from ed25519-dalek signing key
+        let keypair_bytes = signing_key.to_keypair_bytes();
+        let keypair = Keypair::try_from(keypair_bytes.as_slice()).map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Failed to create keypair: {}",
+                e
+            )))
+        })?;
+
+        // Create Solana SDK RPC client
+        let sdk_client = SolanaRpcClient::new_with_timeout_and_commitment(
+            rpc_url.to_string(),
+            config.timeout,
+            CommitmentConfig::confirmed(),
+        );
+
+        info!(rpc_url = %rpc_url, "Created blockchain client with SDK support");
         Ok(Self {
             provider: Box::new(provider),
             config,
+            sdk_client: Some(sdk_client),
+            keypair: Some(keypair),
         })
     }
 
@@ -206,7 +244,12 @@ impl RpcBlockchainClient {
 
     /// Create a new client with a specific provider (useful for testing)
     pub fn with_provider(provider: Box<dyn SolanaRpcProvider>, config: RpcClientConfig) -> Self {
-        Self { provider, config }
+        Self {
+            provider,
+            config,
+            sdk_client: None,
+            keypair: None,
+        }
     }
 
     /// Get the public key as base58 string
@@ -580,21 +623,197 @@ impl BlockchainClient for RpcBlockchainClient {
             )));
         }
 
+        // Check if we have SDK client and keypair
+        let (sdk_client, keypair) = match (&self.sdk_client, &self.keypair) {
+            (Some(client), Some(kp)) => (client, kp),
+            _ => {
+                // Fallback to legacy implementation for testing
+                debug!("Using legacy transfer implementation");
+                let blockhash = self.get_latest_blockhash().await?;
+                let tx = self.build_transfer_transaction(to_address, lamports, &blockhash)?;
+                let params = serde_json::json!([tx, {"encoding": "base64"}]);
+                let signature: String = self.rpc_call("sendTransaction", params).await?;
+                return Ok(signature);
+            }
+        };
+
+        // Parse destination address
+        let to_pubkey = to_address.parse::<Pubkey>().map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Invalid destination address: {}",
+                e
+            )))
+        })?;
+
+        // Create transfer instruction using SDK
+        let instruction = system_instruction::transfer(&keypair.pubkey(), &to_pubkey, lamports);
+
+        // Get recent blockhash using SDK
+        let recent_blockhash = sdk_client
+            .get_latest_blockhash()
+            .await
+            .map_err(map_solana_client_error)?;
+
+        // Build and sign transaction
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&keypair.pubkey()),
+            &[keypair],
+            recent_blockhash,
+        );
+
+        // Send and confirm transaction
+        let signature = sdk_client
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(map_solana_client_error)?;
+
+        info!(signature = %signature, to = %to_address, lamports = %lamports, "SOL transfer submitted via SDK");
+
+        Ok(signature.to_string())
+    }
+
+    #[instrument(skip(self))]
+    async fn transfer_token(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        amount: u64,
+    ) -> Result<String, AppError> {
+        info!(to = %to_address, token_mint = %token_mint, amount = %amount, "Transferring SPL Token");
+
+        // Validate amount
+        if amount == 0 {
+            return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
+                "Transfer amount must be greater than 0".to_string(),
+            )));
+        }
+
+        // Check if we have SDK client and keypair
+        let (sdk_client, keypair) = match (&self.sdk_client, &self.keypair) {
+            (Some(client), Some(kp)) => (client, kp),
+            _ => {
+                return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
+                    "SDK client not initialized for token transfers".to_string(),
+                )));
+            }
+        };
+
+        // Parse addresses
+        let to_pubkey = to_address.parse::<Pubkey>().map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Invalid destination address: {}",
+                e
+            )))
+        })?;
+
+        let mint_pubkey = token_mint.parse::<Pubkey>().map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Invalid token mint address: {}",
+                e
+            )))
+        })?;
+
+        // Derive Associated Token Accounts
+        let source_ata = get_associated_token_address(&keypair.pubkey(), &mint_pubkey);
+        let destination_ata = get_associated_token_address(&to_pubkey, &mint_pubkey);
+
+        debug!(
+            source_ata = %source_ata,
+            destination_ata = %destination_ata,
+            "Derived ATAs for token transfer"
+        );
+
+        let mut instructions: Vec<Instruction> = Vec::new();
+
+        // Check if destination ATA exists
+        let dest_account_result = sdk_client.get_account(&destination_ata).await;
+
+        if dest_account_result.is_err() {
+            // ATA doesn't exist - create it
+            info!(destination_ata = %destination_ata, "Creating destination ATA");
+            let create_ata_ix = create_associated_token_account(
+                &keypair.pubkey(), // payer
+                &to_pubkey,        // wallet owner
+                &mint_pubkey,      // token mint
+                &spl_token::id(),  // token program
+            );
+            instructions.push(create_ata_ix);
+        }
+
+        // Create SPL Token transfer instruction
+        let transfer_ix = token_instruction::transfer(
+            &spl_token::id(),
+            &source_ata,
+            &destination_ata,
+            &keypair.pubkey(),
+            &[],
+            amount,
+        )
+        .map_err(|e| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                "Failed to create transfer instruction: {}",
+                e
+            )))
+        })?;
+
+        instructions.push(transfer_ix);
+
         // Get recent blockhash
-        let blockhash = self.get_latest_blockhash().await?;
-        debug!(blockhash = %blockhash, "Got recent blockhash for transfer");
+        let recent_blockhash = sdk_client
+            .get_latest_blockhash()
+            .await
+            .map_err(map_solana_client_error)?;
 
-        // Build the transfer transaction
-        let tx = self.build_transfer_transaction(to_address, lamports, &blockhash)?;
-        debug!("Built transfer transaction");
+        // Build and sign transaction
+        let transaction = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&keypair.pubkey()),
+            &[keypair],
+            recent_blockhash,
+        );
 
-        // Send the transaction using base64 encoding
-        let params = serde_json::json!([tx, {"encoding": "base64"}]);
-        let signature: String = self.rpc_call("sendTransaction", params).await?;
+        // Send and confirm transaction
+        let signature = sdk_client
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(map_solana_client_error)?;
 
-        info!(signature = %signature, to = %to_address, lamports = %lamports, "SOL transfer submitted");
+        info!(
+            signature = %signature,
+            to = %to_address,
+            token_mint = %token_mint,
+            amount = %amount,
+            "SPL Token transfer submitted"
+        );
 
-        Ok(signature)
+        Ok(signature.to_string())
+    }
+}
+
+/// Map Solana client errors to our AppError types
+fn map_solana_client_error(err: solana_client::client_error::ClientError) -> AppError {
+    use solana_client::client_error::ClientErrorKind;
+
+    let msg = err.to_string();
+
+    match err.kind() {
+        ClientErrorKind::RpcError(_) => {
+            if msg.contains("insufficient") || msg.contains("InsufficientFunds") {
+                AppError::Blockchain(BlockchainError::InsufficientFunds)
+            } else {
+                AppError::Blockchain(BlockchainError::RpcError(msg))
+            }
+        }
+        ClientErrorKind::Io(_) => AppError::Blockchain(BlockchainError::Connection(msg)),
+        ClientErrorKind::Reqwest(_) => {
+            if msg.contains("timeout") || msg.contains("timed out") {
+                AppError::Blockchain(BlockchainError::Timeout(msg))
+            } else {
+                AppError::Blockchain(BlockchainError::Connection(msg))
+            }
+        }
+        _ => AppError::Blockchain(BlockchainError::TransactionFailed(msg)),
     }
 }
 

@@ -34,6 +34,7 @@ async fn test_full_transfer_lifecycle_flow() {
         from_address: "SenderAddress".to_string(),
         to_address: "ReceiverAddress".to_string(),
         amount_sol: 50.0,
+        token_mint: None,
     };
 
     let create_request = Request::builder()
@@ -103,6 +104,7 @@ async fn test_post_bad_request_validation() {
         from_address: "".to_string(), // Invalid
         to_address: "ValidAddress".to_string(),
         amount_sol: 10.0,
+        token_mint: None,
     };
 
     let request = Request::builder()

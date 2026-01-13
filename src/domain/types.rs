@@ -174,10 +174,15 @@ pub struct SubmitTransferRequest {
     #[validate(length(min = 1, message = "To address is required"))]
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount of SOL to transfer
+    /// Amount of SOL (or tokens) to transfer
     #[validate(range(min = 0.000000001, message = "Amount must be greater than 0"))]
     #[schema(example = 0.5)]
     pub amount_sol: f64,
+    /// Optional SPL Token mint address. If None, this is a native SOL transfer.
+    /// If Some, this is an SPL Token transfer for the specified mint.
+    #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token_mint: Option<String>,
 }
 
 impl SubmitTransferRequest {
@@ -187,7 +192,30 @@ impl SubmitTransferRequest {
             from_address,
             to_address,
             amount_sol,
+            token_mint: None,
         }
+    }
+
+    /// Create a new SPL Token transfer request
+    #[must_use]
+    pub fn new_token_transfer(
+        from_address: String,
+        to_address: String,
+        amount: f64,
+        token_mint: String,
+    ) -> Self {
+        Self {
+            from_address,
+            to_address,
+            amount_sol: amount,
+            token_mint: Some(token_mint),
+        }
+    }
+
+    /// Check if this is an SPL Token transfer
+    #[must_use]
+    pub fn is_token_transfer(&self) -> bool {
+        self.token_mint.is_some()
     }
 }
 

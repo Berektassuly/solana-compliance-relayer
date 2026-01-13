@@ -55,6 +55,7 @@ async fn test_create_and_get_transfer_request() {
         from_address: "From1".to_string(),
         to_address: "To1".to_string(),
         amount_sol: 100.0,
+        token_mint: None,
     };
 
     // Create item
@@ -88,6 +89,7 @@ async fn test_list_requests_pagination() {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
             amount_sol: i as f64,
+            token_mint: None,
         };
         client
             .submit_transfer(&request)
@@ -132,6 +134,7 @@ async fn test_blockchain_status_updates() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
     let created = client
         .submit_transfer(&request)
@@ -199,6 +202,7 @@ async fn test_get_pending_blockchain_requests() {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
             amount_sol: 1.0,
+            token_mint: None,
         };
         let item = client
             .submit_transfer(&request)
@@ -262,6 +266,7 @@ async fn test_increment_retry_count() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
     let created = client
         .submit_transfer(&request)

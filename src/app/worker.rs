@@ -459,6 +459,7 @@ mod tests {
             from_address: "AddressA".to_string(),
             to_address: "AddressB".to_string(),
             amount_sol: 1.5,
+            token_mint: None,
         };
         let tr = db.submit_transfer(&request).await.unwrap();
 

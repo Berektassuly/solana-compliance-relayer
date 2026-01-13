@@ -35,6 +35,7 @@ async fn test_submit_transfer_success() {
         from_address: "FromAddr".to_string(),
         to_address: "ToAddr".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
 
     let request = Request::builder()
@@ -63,6 +64,7 @@ async fn test_submit_transfer_validation_error() {
         from_address: "".to_string(),
         to_address: "ToAddr".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
 
     let request = Request::builder()
@@ -114,6 +116,7 @@ async fn test_list_requests_with_pagination() {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
             amount_sol: i as f64,
+            token_mint: None,
         };
         state.service.submit_transfer(&payload).await.unwrap();
     }
@@ -170,6 +173,7 @@ async fn test_get_request_success() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 10.0,
+        token_mint: None,
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();
 
@@ -216,6 +220,7 @@ async fn test_graceful_degradation_blockchain_failure() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
 
     let request = Request::builder()
@@ -316,6 +321,7 @@ async fn test_database_failure() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
 
     let request = Request::builder()
@@ -396,6 +402,7 @@ async fn test_retry_handler_not_eligible() {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
         amount_sol: 1.0,
+        token_mint: None,
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();
 

@@ -118,6 +118,21 @@ pub trait BlockchainClient: Send + Sync {
             "transfer_sol not implemented".to_string(),
         ))
     }
+
+    /// Transfer SPL Tokens from the issuer wallet to a destination address
+    /// Creates the destination ATA if it doesn't exist
+    /// Returns the transaction signature on success
+    async fn transfer_token(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        amount: u64,
+    ) -> Result<String, AppError> {
+        let _ = (to_address, token_mint, amount);
+        Err(AppError::NotSupported(
+            "transfer_token not implemented".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
