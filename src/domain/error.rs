@@ -78,6 +78,14 @@ pub enum ExternalServiceError {
     Timeout(String),
     #[error("Rate limited: {0}")]
     RateLimited(String),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("API error (status {status_code}): {message}")]
+    ApiError { status_code: u16, message: String },
+    #[error("Parse error: {0}")]
+    ParseError(String),
 }
 
 #[derive(Error, Debug)]

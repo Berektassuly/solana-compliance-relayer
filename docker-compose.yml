@@ -1,14 +1,71 @@
+# ============================================================================
+# Solana Compliance Relayer - Docker Compose
+# Production-ready configuration with PostgreSQL and application service
+# ============================================================================
+
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
   db:
     image: postgres:16-alpine
+    container_name: compliance-relayer-db
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=app_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: compliance_relayer
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Solana Compliance Relayer Application
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: compliance-relayer-app
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      # Database connection
+      DATABASE_URL: postgres://postgres:postgres@db:5432/compliance_relayer
+
+      # Solana RPC configuration (use your preferred provider)
+      # Examples:
+      #   - Helius: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+      #   - QuickNode: https://your-quicknode-endpoint.solana-mainnet.quiknode.pro/YOUR_KEY
+      #   - Devnet: https://api.devnet.solana.com
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+
+      # Issuer wallet private key (base58 encoded)
+      ISSUER_PRIVATE_KEY: ${ISSUER_PRIVATE_KEY:-}
+
+      # Range Protocol compliance API (optional - uses mock mode if not set)
+      RANGE_API_KEY: ${RANGE_API_KEY:-}
+      RANGE_API_URL: ${RANGE_API_URL:-}
+
+      # Application settings
+      HOST: 0.0.0.0
+      PORT: 3000
+      ENABLE_RATE_LIMITING: ${ENABLE_RATE_LIMITING:-false}
+      ENABLE_BACKGROUND_WORKER: ${ENABLE_BACKGROUND_WORKER:-true}
+
+      # Logging
+      RUST_LOG: ${RUST_LOG:-info,tower_http=debug,sqlx=warn}
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+    driver: local

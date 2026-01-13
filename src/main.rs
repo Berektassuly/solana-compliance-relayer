@@ -30,6 +30,10 @@ struct Config {
     rate_limit_config: RateLimitConfig,
     enable_background_worker: bool,
     worker_config: WorkerConfig,
+    /// Range Protocol API key (optional - uses mock mode if not set)
+    range_api_key: Option<String>,
+    /// Range Protocol API base URL (optional - uses default if not set)
+    range_api_url: Option<String>,
 }
 
 impl Config {
@@ -50,6 +54,10 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true);
 
+        // Range Protocol configuration (optional)
+        let range_api_key = env::var("RANGE_API_KEY").ok().filter(|k| !k.is_empty());
+        let range_api_url = env::var("RANGE_API_URL").ok().filter(|u| !u.is_empty());
+
         let rate_limit_config = RateLimitConfig::from_env();
         let worker_config = WorkerConfig {
             enabled: enable_background_worker,
@@ -66,6 +74,8 @@ impl Config {
             rate_limit_config,
             enable_background_worker,
             worker_config,
+            range_api_key,
+            range_api_url,
         })
     }
 
@@ -149,8 +159,15 @@ async fn main() -> Result<()> {
     info!("   ✓ Blockchain client created");
 
     // Initialize compliance provider
-    let compliance_provider = solana_compliance_relayer::infra::RangeComplianceProvider::new();
-    info!("   ✓ Compliance provider created");
+    let compliance_provider = solana_compliance_relayer::infra::RangeComplianceProvider::new(
+        config.range_api_key.clone(),
+        config.range_api_url.clone(),
+    );
+    if config.range_api_key.is_some() {
+        info!("   ✓ Compliance provider created (Range Protocol API)");
+    } else {
+        warn!("   ⚠ Compliance provider created (MOCK MODE - no RANGE_API_KEY)");
+    }
 
     // Create application state
     let app_state = Arc::new(AppState::new(

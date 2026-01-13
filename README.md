@@ -274,6 +274,34 @@ For a step-by-step testing walkthrough with curl examples, see the [Judge's Test
 | `confirmed` | Transaction confirmed on-chain |
 | `failed` | Max retries exceeded |
 
+### Supported Providers
+
+The Solana Compliance Relayer is **RPC-agnostic** and works with any Solana RPC provider. Configure via the `SOLANA_RPC_URL` environment variable.
+
+| Provider | Configuration Example |
+|----------|----------------------|
+| **Helius** | `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY` |
+| **QuickNode** | `SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY` |
+| **Alchemy** | `SOLANA_RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR_API_KEY` |
+| **Devnet** | `SOLANA_RPC_URL=https://api.devnet.solana.com` (default) |
+
+> [!TIP]
+> For production deployments, we recommend **Helius** or **QuickNode** for their reliability and enhanced APIs. The default Solana devnet RPC is suitable for development and testing only.
+
+#### Example `.env` Configuration
+
+```env
+# Production with Helius
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=your-helius-key
+RANGE_API_KEY=your-range-protocol-key
+ISSUER_PRIVATE_KEY=your-base58-private-key
+
+# Development (uses default devnet, mock compliance)
+SOLANA_RPC_URL=https://api.devnet.solana.com
+# RANGE_API_KEY not set = mock compliance mode
+```
+
+
 ---
 
 ## Testing
