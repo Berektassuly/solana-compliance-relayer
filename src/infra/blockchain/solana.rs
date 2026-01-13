@@ -775,6 +775,45 @@ impl BlockchainClient for RpcBlockchainClient {
             "Derived ATAs for token transfer"
         );
 
+        // CRITICAL: Verify source ATA exists and has sufficient balance
+        let source_account = sdk_client.get_account(&source_ata).await.map_err(|e| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                "Source token account does not exist or cannot be fetched. \
+                 The sender ({}) does not have an associated token account for mint {}. \
+                 Error: {}",
+                keypair.pubkey(),
+                token_mint,
+                e
+            )))
+        })?;
+
+        // Verify the source account is owned by the token program
+        if source_account.owner != token_program_id {
+            return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
+                format!(
+                    "Source token account is not owned by the token program. \
+                     Expected owner: {}, actual owner: {}",
+                    token_program_id, source_account.owner
+                ),
+            )));
+        }
+
+        // Extract balance from token account data to verify sufficient funds
+        // Token account layout: amount is at bytes 64-72 (u64 LE)
+        const TOKEN_ACCOUNT_AMOUNT_OFFSET: usize = 64;
+        if source_account.data.len() >= TOKEN_ACCOUNT_AMOUNT_OFFSET + 8 {
+            let balance_bytes: [u8; 8] = source_account.data
+                [TOKEN_ACCOUNT_AMOUNT_OFFSET..TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
+                .try_into()
+                .unwrap();
+            let balance = u64::from_le_bytes(balance_bytes);
+            debug!(source_balance = %balance, required = %raw_amount, "Checking source token balance");
+
+            if balance < raw_amount {
+                return Err(AppError::Blockchain(BlockchainError::InsufficientFunds));
+            }
+        }
+
         let mut instructions: Vec<Instruction> = Vec::new();
 
         // Check if destination ATA exists
@@ -793,18 +832,21 @@ impl BlockchainClient for RpcBlockchainClient {
             instructions.push(create_ata_ix);
         }
 
-        // Create SPL Token transfer instruction using the correct token program
-        let transfer_ix = token_instruction::transfer(
+        // Create SPL Token transfer_checked instruction for safer transfers
+        // transfer_checked validates the mint and decimals, providing better error messages
+        let transfer_ix = token_instruction::transfer_checked(
             &token_program_id,
             &source_ata,
+            &mint_pubkey,
             &destination_ata,
-            &keypair.pubkey(),
-            &[],
+            &keypair.pubkey(), // authority (owner of source account)
+            &[],               // no multisig signers
             raw_amount,
+            decimals,
         )
         .map_err(|e| {
             AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                "Failed to create transfer instruction: {}",
+                "Failed to create transfer_checked instruction: {}",
                 e
             )))
         })?;
