@@ -122,6 +122,7 @@ impl DatabaseClient for MockDatabaseClient {
             from_address: data.from_address.clone(),
             to_address: data.to_address.clone(),
             amount_sol: data.amount_sol,
+            token_mint: data.token_mint.clone(),
             compliance_status,
             blockchain_status: BlockchainStatus::Pending,
             blockchain_signature: None,
@@ -346,6 +347,23 @@ impl BlockchainClient for MockBlockchainClient {
         );
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!("transfer:{}:{}", to_address, lamports));
+        Ok(signature)
+    }
+
+    async fn transfer_token(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        amount: u64,
+    ) -> Result<String, AppError> {
+        self.check_should_fail()?;
+        let mint_prefix = &token_mint[..8.min(token_mint.len())];
+        let signature = format!("token_sig_{}_{}", mint_prefix, amount);
+        let mut transactions = self.transactions.lock().unwrap();
+        transactions.push(format!(
+            "token_transfer:{}:{}:{}",
+            to_address, token_mint, amount
+        ));
         Ok(signature)
     }
 }

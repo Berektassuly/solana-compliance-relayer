@@ -238,14 +238,34 @@ impl AppService {
             return Ok(());
         }
 
-        // Use transfer_sol for actual SOL transfers
-        match self
-            .blockchain_client
-            .transfer_sol(&request.to_address, request.amount_sol)
-            .await
-        {
+        // Choose transfer type based on token_mint presence
+        let result = match &request.token_mint {
+            Some(mint) => {
+                // SPL Token transfer - convert float amount to token units
+                // Assuming 6 decimals (standard for USDC, USDT, etc.)
+                let amount_units = (request.amount_sol * 1_000_000.0) as u64;
+                info!(id = %request.id, mint = %mint, amount_units = %amount_units, "Processing SPL Token transfer");
+                self.blockchain_client
+                    .transfer_token(&request.to_address, mint, amount_units)
+                    .await
+            }
+            None => {
+                // Native SOL transfer
+                info!(id = %request.id, amount_sol = %request.amount_sol, "Processing native SOL transfer");
+                self.blockchain_client
+                    .transfer_sol(&request.to_address, request.amount_sol)
+                    .await
+            }
+        };
+
+        match result {
             Ok(signature) => {
-                info!(id = %request.id, signature = %signature, "SOL transfer successful");
+                let transfer_type = if request.token_mint.is_some() {
+                    "Token"
+                } else {
+                    "SOL"
+                };
+                info!(id = %request.id, signature = %signature, r#type = %transfer_type, "Transfer successful");
                 self.db_client
                     .update_blockchain_status(
                         &request.id,
@@ -257,7 +277,12 @@ impl AppService {
                     .await?;
             }
             Err(e) => {
-                warn!(id = %request.id, error = ?e, "SOL transfer failed");
+                let transfer_type = if request.token_mint.is_some() {
+                    "Token"
+                } else {
+                    "SOL"
+                };
+                warn!(id = %request.id, error = ?e, r#type = %transfer_type, "Transfer failed");
                 let retry_count = self.db_client.increment_retry_count(&request.id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)

@@ -87,6 +87,7 @@ impl PostgresClient {
             from_address: row.get("from_address"),
             to_address: row.get("to_address"),
             amount_sol: row.get("amount_sol"),
+            token_mint: row.get("token_mint"),
             compliance_status: compliance_status_str
                 .parse()
                 .unwrap_or(ComplianceStatus::Pending),
@@ -118,7 +119,7 @@ impl DatabaseClient for PostgresClient {
     async fn get_transfer_request(&self, id: &str) -> Result<Option<TransferRequest>, AppError> {
         let row = sqlx::query(
             r#"
-            SELECT id, from_address, to_address, amount_sol, compliance_status,
+            SELECT id, from_address, to_address, amount_sol, token_mint, compliance_status,
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at 
@@ -148,17 +149,18 @@ impl DatabaseClient for PostgresClient {
         sqlx::query(
             r#"
             INSERT INTO transfer_requests (
-                id, from_address, to_address, amount_sol, 
+                id, from_address, to_address, amount_sol, token_mint,
                 compliance_status, blockchain_status, blockchain_retry_count,
                 created_at, updated_at
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(&id)
         .bind(&data.from_address)
         .bind(&data.to_address)
         .bind(data.amount_sol)
+        .bind(data.token_mint.as_deref())
         .bind(ComplianceStatus::Pending.as_str())
         .bind(BlockchainStatus::Pending.as_str())
         .bind(0i32)
@@ -173,6 +175,7 @@ impl DatabaseClient for PostgresClient {
             from_address: data.from_address.clone(),
             to_address: data.to_address.clone(),
             amount_sol: data.amount_sol,
+            token_mint: data.token_mint.clone(),
             compliance_status: ComplianceStatus::Pending,
             blockchain_status: BlockchainStatus::Pending,
             blockchain_signature: None,
@@ -219,7 +222,7 @@ impl DatabaseClient for PostgresClient {
 
                 sqlx::query(
                     r#"
-                    SELECT id, from_address, to_address, amount_sol, compliance_status,
+                    SELECT id, from_address, to_address, amount_sol, token_mint, compliance_status,
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at
@@ -238,7 +241,7 @@ impl DatabaseClient for PostgresClient {
             }
             None => sqlx::query(
                 r#"
-                    SELECT id, from_address, to_address, amount_sol, compliance_status,
+                    SELECT id, from_address, to_address, amount_sol, token_mint, compliance_status,
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at
@@ -337,7 +340,7 @@ impl DatabaseClient for PostgresClient {
         let now = Utc::now();
         let rows = sqlx::query(
             r#"
-            SELECT id, from_address, to_address, amount_sol, compliance_status,
+            SELECT id, from_address, to_address, amount_sol, token_mint, compliance_status,
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at

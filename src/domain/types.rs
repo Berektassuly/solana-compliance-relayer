@@ -109,9 +109,13 @@ pub struct TransferRequest {
     /// Recipient wallet address (Base58 Solana address)
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount of SOL to transfer
+    /// Amount of SOL (or token units) to transfer
     #[schema(example = 0.5)]
     pub amount_sol: f64,
+    /// Optional SPL Token mint address. None means native SOL transfer.
+    #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token_mint: Option<String>,
     /// Compliance check status
     pub compliance_status: ComplianceStatus,
     /// Blockchain submission status
@@ -140,6 +144,7 @@ impl TransferRequest {
             from_address,
             to_address,
             amount_sol,
+            token_mint: None,
             compliance_status: ComplianceStatus::Pending,
             blockchain_status: BlockchainStatus::Pending,
             blockchain_signature: None,
@@ -149,6 +154,26 @@ impl TransferRequest {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Create a new token transfer request
+    #[must_use]
+    pub fn new_token(
+        id: String,
+        from_address: String,
+        to_address: String,
+        amount: f64,
+        token_mint: String,
+    ) -> Self {
+        let mut request = Self::new(id, from_address, to_address, amount);
+        request.token_mint = Some(token_mint);
+        request
+    }
+
+    /// Check if this is an SPL Token transfer
+    #[must_use]
+    pub fn is_token_transfer(&self) -> bool {
+        self.token_mint.is_some()
     }
 }
 
