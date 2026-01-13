@@ -679,12 +679,12 @@ impl BlockchainClient for RpcBlockchainClient {
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: u64,
+        amount: f64,
     ) -> Result<String, AppError> {
         info!(to = %to_address, token_mint = %token_mint, amount = %amount, "Transferring SPL Token");
 
         // Validate amount
-        if amount == 0 {
+        if amount <= 0.0 {
             return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
                 "Transfer amount must be greater than 0".to_string(),
             )));
@@ -715,7 +715,7 @@ impl BlockchainClient for RpcBlockchainClient {
             )))
         })?;
 
-        // Fetch the mint account to determine the correct token program ID
+        // Fetch the mint account to determine the correct token program ID and decimals
         // This handles both legacy SPL Token and Token-2022
         let mint_account = sdk_client.get_account(&mint_pubkey).await.map_err(|e| {
             AppError::Blockchain(BlockchainError::TransactionFailed(format!(
@@ -727,6 +727,23 @@ impl BlockchainClient for RpcBlockchainClient {
         // The mint account's owner is the token program ID
         let token_program_id = mint_account.owner;
         debug!(token_program_id = %token_program_id, "Detected token program from mint");
+
+        // Unpack the mint data to get decimals
+        use solana_program::program_pack::Pack;
+        let mint_data = spl_token::state::Mint::unpack(&mint_account.data).map_err(|e| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                "Failed to unpack mint data: {}",
+                e
+            )))
+        })?;
+
+        let decimals = mint_data.decimals;
+        debug!(decimals = %decimals, "Read decimals from mint account");
+
+        // Convert human-readable amount to raw token units
+        // e.g., 1.5 USDC (6 decimals) -> 1_500_000 raw units
+        let raw_amount = (amount * 10f64.powi(decimals as i32)) as u64;
+        info!(raw_amount = %raw_amount, decimals = %decimals, "Calculated raw token amount");
 
         // Derive Associated Token Accounts with the correct token program ID
         let source_ata = get_associated_token_address_with_program_id(
@@ -772,7 +789,7 @@ impl BlockchainClient for RpcBlockchainClient {
             &destination_ata,
             &keypair.pubkey(),
             &[],
-            amount,
+            raw_amount,
         )
         .map_err(|e| {
             AppError::Blockchain(BlockchainError::TransactionFailed(format!(
@@ -808,6 +825,7 @@ impl BlockchainClient for RpcBlockchainClient {
             to = %to_address,
             token_mint = %token_mint,
             amount = %amount,
+            raw_amount = %raw_amount,
             "SPL Token transfer submitted"
         );
 

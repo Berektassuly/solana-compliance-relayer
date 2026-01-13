@@ -241,12 +241,11 @@ impl AppService {
         // Choose transfer type based on token_mint presence
         let result = match &request.token_mint {
             Some(mint) => {
-                // SPL Token transfer - convert float amount to token units
-                // Assuming 6 decimals (standard for USDC, USDT, etc.)
-                let amount_units = (request.amount_sol * 1_000_000.0) as u64;
-                info!(id = %request.id, mint = %mint, amount_units = %amount_units, "Processing SPL Token transfer");
+                // SPL Token transfer - pass human-readable amount directly
+                // Decimals are read from the mint account by the blockchain client
+                info!(id = %request.id, mint = %mint, amount = %request.amount_sol, "Processing SPL Token transfer");
                 self.blockchain_client
-                    .transfer_token(&request.to_address, mint, amount_units)
+                    .transfer_token(&request.to_address, mint, request.amount_sol)
                     .await
             }
             None => {

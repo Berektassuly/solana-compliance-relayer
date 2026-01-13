@@ -121,12 +121,14 @@ pub trait BlockchainClient: Send + Sync {
 
     /// Transfer SPL Tokens from the issuer wallet to a destination address
     /// Creates the destination ATA if it doesn't exist
+    /// The amount is in human-readable units (e.g., 1.5 USDC), not raw token units
+    /// Decimals are read dynamically from the mint account
     /// Returns the transaction signature on success
     async fn transfer_token(
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: u64,
+        amount: f64,
     ) -> Result<String, AppError> {
         let _ = (to_address, token_mint, amount);
         Err(AppError::NotSupported(

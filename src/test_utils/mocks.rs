@@ -354,15 +354,17 @@ impl BlockchainClient for MockBlockchainClient {
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: u64,
+        amount: f64,
     ) -> Result<String, AppError> {
         self.check_should_fail()?;
         let mint_prefix = &token_mint[..8.min(token_mint.len())];
-        let signature = format!("token_sig_{}_{}", mint_prefix, amount);
+        // For mock, assume 6 decimals like USDC
+        let raw_amount = (amount * 1_000_000.0) as u64;
+        let signature = format!("token_sig_{}_{}", mint_prefix, raw_amount);
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
             "token_transfer:{}:{}:{}",
-            to_address, token_mint, amount
+            to_address, token_mint, raw_amount
         ));
         Ok(signature)
     }
