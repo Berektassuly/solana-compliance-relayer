@@ -7,6 +7,7 @@ fn bench_validation(c: &mut Criterion) {
         from_address: "AddressA".to_string(),
         to_address: "AddressB".to_string(),
         amount_sol: 10.5,
+        token_mint: None,
     };
 
     c.bench_function("validate_transfer_request", |b| {
