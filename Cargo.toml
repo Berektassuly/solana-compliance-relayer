@@ -36,9 +36,9 @@ tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
 bs58 = "0.5"
 base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-rand = "0.8"
+rand = "0.8.5"
 sha2 = "0.10"
-validator = { version = "0.19", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -48,16 +48,18 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Rate limiting  
-governor = "0.8"
+governor = "0.10.4"
 
 # Solana SDK
 solana-sdk = "3.0.0"
 solana-client = "3.0.0"
 solana-commitment-config = "3.0.0"
-solana-system-interface = { version = "2.0.0", features = ["bincode"] }
+solana-system-interface = { version = "3.0.0", features = ["bincode"] }
 spl-token = "9.0.0"
+solana-program-pack = "3.0.0"
 spl-token-interface = "2.0.0"
 spl-associated-token-account = "8.0.0"
+bytemuck = "1.14"
 
 [dev-dependencies]
 solana-compliance-relayer = { path = ".", features = ["test-utils"] }
@@ -65,7 +67,7 @@ http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tokio-test = "0.4"
 testcontainers = "0.26"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8.1", features = ["async_tokio"] }
 
 [[bench]]
 name = "domain_benchmarks"

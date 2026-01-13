@@ -728,16 +728,27 @@ impl BlockchainClient for RpcBlockchainClient {
         let token_program_id = mint_account.owner;
         debug!(token_program_id = %token_program_id, "Detected token program from mint");
 
-        // Unpack the mint data to get decimals
-        use solana_program::program_pack::Pack;
-        let mint_data = spl_token::state::Mint::unpack(&mint_account.data).map_err(|e| {
-            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                "Failed to unpack mint data: {}",
-                e
-            )))
-        })?;
+        // Extract decimals from mint account data manually
+        // Mint layout (both SPL Token and Token-2022):
+        // - bytes 0-3: mint_authority option (1 byte option flag + 32 bytes pubkey if Some)
+        // - bytes 36-43: supply (u64)
+        // - byte 44: decimals (u8)
+        // - byte 45: is_initialized (bool)
+        // - bytes 46-78: freeze_authority option
+        const DECIMALS_OFFSET: usize = 44;
+        const MIN_MINT_SIZE: usize = 82;
 
-        let decimals = mint_data.decimals;
+        if mint_account.data.len() < MIN_MINT_SIZE {
+            return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
+                format!(
+                    "Mint account data too small: {} bytes, expected at least {}",
+                    mint_account.data.len(),
+                    MIN_MINT_SIZE
+                ),
+            )));
+        }
+
+        let decimals = mint_account.data[DECIMALS_OFFSET];
         debug!(decimals = %decimals, "Read decimals from mint account");
 
         // Convert human-readable amount to raw token units
