@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -26,7 +26,7 @@ COPY migrations ./migrations
 COPY benches ./benches
 
 # Build release binary
-RUN cargo build --release --locked
+RUN cargo build --release --locked --features real-blockchain
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
