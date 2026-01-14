@@ -17,7 +17,7 @@ use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
+    instruction::Instruction,
     pubkey::Pubkey,
     signer::{Signer as SolanaSigner, keypair::Keypair},
     transaction::Transaction,
@@ -505,72 +505,38 @@ impl BlockchainClient for RpcBlockchainClient {
     async fn submit_transaction(&self, request: &TransferRequest) -> Result<String, AppError> {
         info!(id = %request.id, "Submitting transaction for request");
 
-        // Check if we have SDK client and keypair
-        let (sdk_client, keypair) = match (&self.sdk_client, &self.keypair) {
-            (Some(client), Some(kp)) => (client, kp),
-            _ => {
-                // Mock implementation for testing (when SDK client not available)
-                debug!("Using mock implementation for submit_transaction");
-                let signature = self.sign(request.id.as_bytes());
-                return Ok(format!("tx_{}", &signature[..16]));
+        // Check if we have SDK client (for real transactions)
+        if self.sdk_client.is_none() || self.keypair.is_none() {
+            // Mock implementation for testing (when SDK client not available)
+            debug!("Using mock implementation for submit_transaction");
+            let signature = self.sign(request.id.as_bytes());
+            return Ok(format!("tx_{}", &signature[..16]));
+        }
+
+        // Dispatch to the appropriate transfer method based on token_mint
+        match &request.token_mint {
+            Some(mint) => {
+                // SPL Token transfer
+                info!(
+                    id = %request.id,
+                    mint = %mint,
+                    amount = %request.amount_sol,
+                    to = %request.to_address,
+                    "Dispatching SPL Token transfer"
+                );
+                self.transfer_token(&request.to_address, mint, request.amount_sol).await
             }
-        };
-
-        // SPL Memo Program ID
-        let memo_program_id = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
-            .parse::<Pubkey>()
-            .map_err(|e| {
-                AppError::Blockchain(BlockchainError::InvalidSignature(format!(
-                    "Invalid memo program ID: {}",
-                    e
-                )))
-            })?;
-
-        // Build memo content
-        let memo_data = format!("Compliance Relayer Approval: {}", request.id);
-
-        // Create Memo instruction
-        // The memo program requires the signer account to be passed
-        let memo_ix = Instruction::new_with_bytes(
-            memo_program_id,
-            memo_data.as_bytes(),
-            vec![AccountMeta::new(keypair.pubkey(), true)], // signer
-        );
-
-        // Get priority fee (gracefully falls back to default if QuickNode not available)
-        let priority_fee = self.get_quicknode_priority_fee().await;
-
-        // Build instructions with compute budget for priority fee
-        let instructions = vec![
-            ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
-            memo_ix,
-        ];
-
-        // Get recent blockhash using SDK
-        let recent_blockhash = sdk_client
-            .get_latest_blockhash()
-            .await
-            .map_err(map_solana_client_error)?;
-
-        debug!(blockhash = %recent_blockhash, "Got recent blockhash via SDK");
-
-        // Build and sign transaction using SDK
-        let transaction = Transaction::new_signed_with_payer(
-            &instructions,
-            Some(&keypair.pubkey()),
-            &[keypair],
-            recent_blockhash,
-        );
-
-        // Send and confirm transaction
-        let signature = sdk_client
-            .send_and_confirm_transaction(&transaction)
-            .await
-            .map_err(map_solana_client_error)?;
-
-        info!(signature = %signature, "Memo transaction submitted via SDK");
-
-        Ok(signature.to_string())
+            None => {
+                // Native SOL transfer
+                info!(
+                    id = %request.id,
+                    amount_sol = %request.amount_sol,
+                    to = %request.to_address,
+                    "Dispatching native SOL transfer"
+                );
+                self.transfer_sol(&request.to_address, request.amount_sol).await
+            }
+        }
     }
 
     #[instrument(skip(self))]
@@ -1894,54 +1860,24 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- BUILD MEMO TRANSACTION TESTS (only with real-blockchain feature) ---
+    // --- SDK-BASED TRANSFER TESTS (only with real-blockchain feature) ---
 
     #[cfg(feature = "real-blockchain")]
     mod real_blockchain_tests {
         use super::*;
 
-        #[test]
-        fn test_build_memo_transaction_success() {
-            let signing_key = SigningKey::generate(&mut OsRng);
-            let client =
-                RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
-                    .unwrap();
-
-            // Use a valid base58 blockhash (32 bytes)
-            let blockhash = "GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTy5nRhVT3";
-            let result = client.build_memo_transaction("test_memo", blockhash);
-            assert!(result.is_ok());
-
-            let tx = result.unwrap();
-            // Should be valid base58
-            assert!(bs58::decode(&tx).into_vec().is_ok());
-        }
-
-        #[test]
-        fn test_build_memo_transaction_invalid_blockhash() {
-            let signing_key = SigningKey::generate(&mut OsRng);
-            let client =
-                RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
-                    .unwrap();
-
-            // Invalid base58 blockhash
-            let result = client.build_memo_transaction("test_memo", "invalid!!!");
-            assert!(matches!(
-                result,
-                Err(AppError::Blockchain(BlockchainError::InvalidSignature(_)))
-            ));
-        }
-
         #[tokio::test]
         async fn test_submit_transaction_real_blockchain_path() {
-            // This test would need a mock RPC server to fully test
-            // For now, we just verify the code compiles with the feature
+            // This test verifies the SDK client is properly initialized
+            // Actual transfer tests require network/mocking
             let signing_key = SigningKey::generate(&mut OsRng);
             let client =
                 RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                     .unwrap();
 
-            // Can't actually test without network, but verify the method exists
+            // Verify SDK components are initialized
+            assert!(client.sdk_client.is_some());
+            assert!(client.keypair.is_some());
             let _ = client.public_key();
         }
     }
