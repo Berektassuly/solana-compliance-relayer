@@ -274,7 +274,7 @@ mod tests {
         let response = RiskResponse {
             risk_score: 70, // Exactly at threshold
             risk_level: "High risk".to_string(),
-            num_hops: 1,
+            num_hops: Some(1),
             malicious_addresses_found: vec![],
             reasoning: "Bad actor".to_string(),
             attribution: None,
@@ -291,7 +291,7 @@ mod tests {
         let response = RiskResponse {
             risk_score: 69, // Just below threshold
             risk_level: "Medium risk".to_string(),
-            num_hops: 1,
+            num_hops: Some(1),
             malicious_addresses_found: vec![],
             reasoning: "Borderline case".to_string(),
             attribution: None,
@@ -308,7 +308,7 @@ mod tests {
         let response = RiskResponse {
             risk_score: 10, // Low score but text says High (edge case safety)
             risk_level: "High risk".to_string(),
-            num_hops: 1,
+            num_hops: Some(1),
             malicious_addresses_found: vec![],
             reasoning: "Manual override".to_string(),
             attribution: None,
@@ -325,7 +325,7 @@ mod tests {
         let response = RiskResponse {
             risk_score: 1,
             risk_level: "Very low risk".to_string(),
-            num_hops: 2,
+            num_hops: Some(2),
             malicious_addresses_found: vec![],
             reasoning: "Safe".to_string(),
             attribution: None,
