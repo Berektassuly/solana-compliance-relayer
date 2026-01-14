@@ -57,7 +57,7 @@ pub struct Attribution {
 pub struct RiskResponse {
     pub risk_score: i32,
     pub risk_level: String,
-    pub num_hops: u32,
+    pub num_hops: Option<u32>,
     #[serde(default)]
     pub malicious_addresses_found: Vec<MaliciousAddress>,
     #[serde(default)]
