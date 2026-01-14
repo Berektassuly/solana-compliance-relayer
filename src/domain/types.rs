@@ -374,6 +374,24 @@ pub struct RateLimitResponse {
     pub retry_after: u64,
 }
 
+/// Single transaction from Helius webhook (Enhanced Transaction format)
+/// Reference: <https://docs.helius.dev/webhooks-and-websockets/webhooks>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeliusTransaction {
+    /// Transaction type (e.g., "TRANSFER", "NFT_SALE", "UNKNOWN")
+    #[serde(rename = "type")]
+    pub transaction_type: String,
+    /// Transaction signature (base58)
+    pub signature: String,
+    /// Transaction error (null if successful, object/string if failed)
+    #[serde(default)]
+    pub transaction_error: Option<serde_json::Value>,
+    /// Source program (e.g., "SYSTEM_PROGRAM")
+    #[serde(default)]
+    pub source: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

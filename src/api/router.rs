@@ -31,8 +31,9 @@ use crate::app::AppState;
 use crate::domain::{ErrorDetail, ErrorResponse, RateLimitResponse};
 
 use super::handlers::{
-    ApiDoc, get_transfer_request_handler, health_check_handler, list_transfer_requests_handler,
-    liveness_handler, readiness_handler, retry_blockchain_handler, submit_transfer_handler,
+    ApiDoc, get_transfer_request_handler, health_check_handler, helius_webhook_handler,
+    list_transfer_requests_handler, liveness_handler, readiness_handler, retry_blockchain_handler,
+    submit_transfer_handler,
 };
 
 /// Rate limiter configuration
@@ -204,8 +205,12 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/live", get(liveness_handler))
         .route("/ready", get(readiness_handler));
 
+    // Webhook routes (no rate limiting)
+    let webhook_routes = Router::new().route("/helius", post(helius_webhook_handler));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
+        .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .layer(middleware)
         .with_state(app_state)
@@ -250,8 +255,12 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
             rate_limit_health_middleware,
         ));
 
+    // Webhook routes (no rate limiting - webhooks need immediate delivery)
+    let webhook_routes = Router::new().route("/helius", post(helius_webhook_handler));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
+        .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .layer(middleware)
         .with_state(app_state)

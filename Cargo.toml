@@ -59,6 +59,7 @@ spl-token = "9.0.0"
 solana-program-pack = "3.0.0"
 spl-token-interface = "2.0.0"
 spl-associated-token-account = "8.0.0"
+solana-compute-budget-interface = "3.0.0"
 bytemuck = "1.14"
 
 [dev-dependencies]

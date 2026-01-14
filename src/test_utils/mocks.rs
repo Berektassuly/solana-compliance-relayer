@@ -245,6 +245,18 @@ impl DatabaseClient for MockDatabaseClient {
             Err(AppError::Database(DatabaseError::NotFound(id.to_string())))
         }
     }
+
+    async fn get_transfer_by_signature(
+        &self,
+        signature: &str,
+    ) -> Result<Option<TransferRequest>, AppError> {
+        self.check_should_fail()?;
+        let storage = self.storage.lock().unwrap();
+        Ok(storage
+            .values()
+            .find(|req| req.blockchain_signature.as_deref() == Some(signature))
+            .cloned())
+    }
 }
 
 /// Mock blockchain client for testing

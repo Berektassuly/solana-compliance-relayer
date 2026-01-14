@@ -7,7 +7,8 @@ use validator::Validate;
 
 use crate::domain::{
     AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
-    HealthStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest, ValidationError,
+    HealthStatus, HeliusTransaction, PaginatedResponse, SubmitTransferRequest, TransferRequest,
+    ValidationError,
 };
 
 /// Maximum number of retry attempts for blockchain submission
@@ -320,6 +321,57 @@ impl AppService {
             Err(_) => HealthStatus::Unhealthy,
         };
         HealthResponse::new(db_health, blockchain_health)
+    }
+
+    /// Process incoming Helius webhook transactions.
+    /// Updates blockchain status for transactions we have initiated.
+    /// Returns the number of transactions actually processed.
+    #[instrument(skip(self, transactions), fields(tx_count = %transactions.len()))]
+    pub async fn process_helius_webhook(
+        &self,
+        transactions: Vec<HeliusTransaction>,
+    ) -> Result<usize, AppError> {
+        let mut processed = 0;
+
+        for tx in transactions {
+            // Look up by signature to see if this is one of our transactions
+            if let Some(request) = self
+                .db_client
+                .get_transfer_by_signature(&tx.signature)
+                .await?
+            {
+                // Only update if currently in Submitted status (waiting for confirmation)
+                if request.blockchain_status == BlockchainStatus::Submitted {
+                    let (new_status, error_msg) = if tx.transaction_error.is_none() {
+                        info!(id = %request.id, signature = %tx.signature, "Transaction confirmed via Helius webhook");
+                        (BlockchainStatus::Confirmed, None)
+                    } else {
+                        let err = tx
+                            .transaction_error
+                            .as_ref()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "Unknown transaction error".to_string());
+                        warn!(id = %request.id, signature = %tx.signature, error = %err, "Transaction failed via Helius webhook");
+                        (BlockchainStatus::Failed, Some(err))
+                    };
+
+                    self.db_client
+                        .update_blockchain_status(
+                            &request.id,
+                            new_status,
+                            None,
+                            error_msg.as_deref(),
+                            None,
+                        )
+                        .await?;
+
+                    processed += 1;
+                }
+            }
+        }
+
+        info!(processed = %processed, "Helius webhook processing complete");
+        Ok(processed)
     }
 }
 

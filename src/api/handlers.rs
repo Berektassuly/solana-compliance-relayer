@@ -5,17 +5,17 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use tracing::error;
+use tracing::{error, info};
 use utoipa::OpenApi;
 
 use crate::app::AppState;
 use crate::domain::{
     AppError, BlockchainError, DatabaseError, ErrorDetail, ErrorResponse, ExternalServiceError,
-    HealthResponse, HealthStatus, PaginatedResponse, PaginationParams, RateLimitResponse,
-    SubmitTransferRequest, TransferRequest,
+    HealthResponse, HealthStatus, HeliusTransaction, PaginatedResponse, PaginationParams,
+    RateLimitResponse, SubmitTransferRequest, TransferRequest,
 };
 
 /// OpenAPI documentation structure
@@ -213,6 +213,42 @@ pub async fn readiness_handler(State(state): State<Arc<AppState>>) -> StatusCode
         HealthStatus::Healthy | HealthStatus::Degraded => StatusCode::OK,
         HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
     }
+}
+
+/// Handle Helius webhook for transaction confirmation
+///
+/// Receives Enhanced Transaction events from Helius and updates transaction status.
+/// Validates the Authorization header against the configured HELIUS_WEBHOOK_SECRET.
+pub async fn helius_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Vec<HeliusTransaction>>,
+) -> Result<StatusCode, AppError> {
+    // Validate webhook secret if configured
+    if let Some(expected_secret) = &state.helius_webhook_secret {
+        let auth_header = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Authentication("Missing Authorization header".to_string()))?;
+
+        if auth_header != expected_secret {
+            return Err(AppError::Authentication(
+                "Invalid webhook secret".to_string(),
+            ));
+        }
+    }
+
+    // Process the webhook payload
+    let tx_count = payload.len();
+    let processed = state.service.process_helius_webhook(payload).await?;
+
+    info!(
+        received = %tx_count,
+        processed = %processed,
+        "Helius webhook processed"
+    );
+
+    Ok(StatusCode::OK)
 }
 
 impl IntoResponse for AppError {

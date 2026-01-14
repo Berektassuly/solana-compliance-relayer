@@ -15,8 +15,8 @@ use tracing::{debug, info, instrument, warn};
 // Solana SDK imports (v3.0)
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_commitment_config::CommitmentConfig;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::{
-    compute_budget::ComputeBudgetInstruction,
     instruction::Instruction,
     pubkey::Pubkey,
     signer::{Signer as SolanaSigner, keypair::Keypair},
@@ -346,12 +346,12 @@ impl RpcBlockchainClient {
         {
             Ok(result) => match serde_json::from_value::<QuickNodePriorityFeeResponse>(result) {
                 Ok(response) => {
-                    if let Some(fees) = response.per_compute_unit {
-                        if let Some(high) = fees.high {
-                            let fee = high as u64;
-                            info!(priority_fee = %fee, "Applied QuickNode priority fee (micro-lamports)");
-                            return fee;
-                        }
+                    if let Some(fees) = response.per_compute_unit
+                        && let Some(high) = fees.high
+                    {
+                        let fee = high as u64;
+                        info!(priority_fee = %fee, "Applied QuickNode priority fee (micro-lamports)");
+                        return fee;
                     }
                     debug!(
                         "QuickNode response missing per_compute_unit.high, using default priority fee"

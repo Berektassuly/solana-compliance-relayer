@@ -65,6 +65,12 @@ pub trait DatabaseClient: Send + Sync {
 
     /// Increment retry count for a request
     async fn increment_retry_count(&self, id: &str) -> Result<i32, AppError>;
+
+    /// Get a transfer request by blockchain signature
+    async fn get_transfer_by_signature(
+        &self,
+        signature: &str,
+    ) -> Result<Option<TransferRequest>, AppError>;
 }
 
 /// Blockchain client trait for chain operations
@@ -201,6 +207,13 @@ mod tests {
 
         async fn increment_retry_count(&self, _id: &str) -> Result<i32, AppError> {
             Ok(1)
+        }
+
+        async fn get_transfer_by_signature(
+            &self,
+            _signature: &str,
+        ) -> Result<Option<TransferRequest>, AppError> {
+            Ok(None)
         }
     }
 

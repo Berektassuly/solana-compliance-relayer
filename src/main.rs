@@ -34,6 +34,8 @@ struct Config {
     range_api_key: Option<String>,
     /// Range Protocol API base URL (optional - uses default if not set)
     range_api_url: Option<String>,
+    /// Helius webhook secret for authentication (optional)
+    helius_webhook_secret: Option<String>,
 }
 
 impl Config {
@@ -58,6 +60,11 @@ impl Config {
         let range_api_key = env::var("RANGE_API_KEY").ok().filter(|k| !k.is_empty());
         let range_api_url = env::var("RANGE_API_URL").ok().filter(|u| !u.is_empty());
 
+        // Helius webhook configuration (optional)
+        let helius_webhook_secret = env::var("HELIUS_WEBHOOK_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         let rate_limit_config = RateLimitConfig::from_env();
         let worker_config = WorkerConfig {
             enabled: enable_background_worker,
@@ -76,6 +83,7 @@ impl Config {
             worker_config,
             range_api_key,
             range_api_url,
+            helius_webhook_secret,
         })
     }
 
@@ -170,11 +178,18 @@ async fn main() -> Result<()> {
     }
 
     // Create application state
-    let app_state = Arc::new(AppState::new(
+    let app_state = Arc::new(AppState::with_helius_secret(
         Arc::new(postgres_client),
         Arc::new(blockchain_client),
         Arc::new(compliance_provider),
+        config.helius_webhook_secret.clone(),
     ));
+
+    if config.helius_webhook_secret.is_some() {
+        info!("   ✓ Helius webhook secret configured");
+    } else {
+        info!("   ○ Helius webhook secret not configured (webhook auth disabled)");
+    }
 
     // Start background worker if enabled
     let worker_shutdown_tx = if config.enable_background_worker {

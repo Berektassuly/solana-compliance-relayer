@@ -380,6 +380,32 @@ impl DatabaseClient for PostgresClient {
 
         Ok(row.get("blockchain_retry_count"))
     }
+
+    #[instrument(skip(self))]
+    async fn get_transfer_by_signature(
+        &self,
+        signature: &str,
+    ) -> Result<Option<TransferRequest>, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, from_address, to_address, amount_sol, token_mint, compliance_status,
+                   blockchain_status, blockchain_signature, blockchain_retry_count,
+                   blockchain_last_error, blockchain_next_retry_at,
+                   created_at, updated_at 
+            FROM transfer_requests 
+            WHERE blockchain_signature = $1
+            "#,
+        )
+        .bind(signature)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_transfer_request(&row)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]

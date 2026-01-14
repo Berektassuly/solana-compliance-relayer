@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use solana_compliance_relayer::domain::SubmitTransferRequest;
+use std::hint::black_box;
 use validator::Validate;
 
 fn bench_validation(c: &mut Criterion) {
