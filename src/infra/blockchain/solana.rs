@@ -16,6 +16,7 @@ use tracing::{debug, info, instrument, warn};
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
+    compute_budget::ComputeBudgetInstruction,
     instruction::Instruction,
     pubkey::Pubkey,
     signer::{Signer as SolanaSigner, keypair::Keypair},
@@ -204,6 +205,22 @@ struct SignatureStatusResult {
     value: Vec<Option<SignatureStatus>>,
 }
 
+/// Response structure for QuickNode's qn_estimatePriorityFees API
+#[derive(Debug, Deserialize)]
+struct QuickNodePriorityFeeResponse {
+    per_compute_unit: Option<QuickNodePriorityFeeLevel>,
+}
+
+/// Priority fee levels from QuickNode API (values in micro-lamports)
+#[derive(Debug, Deserialize)]
+struct QuickNodePriorityFeeLevel {
+    high: Option<f64>,
+    #[allow(dead_code)]
+    medium: Option<f64>,
+    #[allow(dead_code)]
+    low: Option<f64>,
+}
+
 impl RpcBlockchainClient {
     /// Create a new RPC blockchain client with custom configuration
     pub fn new(
@@ -308,6 +325,52 @@ impl RpcBlockchainClient {
         Err(last_error.unwrap_or_else(|| {
             AppError::Blockchain(BlockchainError::RpcError("Unknown error".to_string()))
         }))
+    }
+
+    /// Attempt to fetch priority fee from QuickNode's qn_estimatePriorityFees.
+    /// Returns the recommended priority fee in micro-lamports.
+    /// This method gracefully handles failures (e.g., non-QuickNode providers)
+    /// and falls back to a default value.
+    async fn get_quicknode_priority_fee(&self) -> u64 {
+        const DEFAULT_PRIORITY_FEE: u64 = 100; // micro-lamports fallback
+
+        let params = serde_json::json!({
+            "last_n_blocks": 100,
+            "api_version": 2
+        });
+
+        match self
+            .provider
+            .send_request("qn_estimatePriorityFees", params)
+            .await
+        {
+            Ok(result) => match serde_json::from_value::<QuickNodePriorityFeeResponse>(result) {
+                Ok(response) => {
+                    if let Some(fees) = response.per_compute_unit {
+                        if let Some(high) = fees.high {
+                            let fee = high as u64;
+                            info!(priority_fee = %fee, "Applied QuickNode priority fee (micro-lamports)");
+                            return fee;
+                        }
+                    }
+                    debug!(
+                        "QuickNode response missing per_compute_unit.high, using default priority fee"
+                    );
+                    DEFAULT_PRIORITY_FEE
+                }
+                Err(e) => {
+                    debug!(error = %e, "Failed to parse QuickNode priority fee response, using default");
+                    DEFAULT_PRIORITY_FEE
+                }
+            },
+            Err(_) => {
+                debug!(
+                    "QuickNode priority fee API not available (provider may not support it), using default: {} micro-lamports",
+                    DEFAULT_PRIORITY_FEE
+                );
+                DEFAULT_PRIORITY_FEE
+            }
+        }
     }
 
     /// Build and serialize a memo transaction
@@ -646,8 +709,17 @@ impl BlockchainClient for RpcBlockchainClient {
             )))
         })?;
 
+        // Get priority fee (gracefully falls back to default if QuickNode not available)
+        let priority_fee = self.get_quicknode_priority_fee().await;
+
         // Create transfer instruction using SDK
-        let instruction = system_instruction::transfer(&keypair.pubkey(), &to_pubkey, lamports);
+        let transfer_ix = system_instruction::transfer(&keypair.pubkey(), &to_pubkey, lamports);
+
+        // Build instructions with compute budget for priority fee
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
+            transfer_ix,
+        ];
 
         // Get recent blockhash using SDK
         let recent_blockhash = sdk_client
@@ -657,7 +729,7 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Build and sign transaction
         let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
+            &instructions,
             Some(&keypair.pubkey()),
             &[keypair],
             recent_blockhash,
@@ -814,7 +886,14 @@ impl BlockchainClient for RpcBlockchainClient {
             }
         }
 
-        let mut instructions: Vec<Instruction> = Vec::new();
+        // Get priority fee (gracefully falls back to default if QuickNode not available)
+        let priority_fee = self.get_quicknode_priority_fee().await;
+
+        // Start with compute budget instruction for priority fee
+        let mut instructions: Vec<Instruction> =
+            vec![ComputeBudgetInstruction::set_compute_unit_price(
+                priority_fee,
+            )];
 
         // Check if destination ATA exists
         let dest_account_result = sdk_client.get_account(&destination_ata).await;
