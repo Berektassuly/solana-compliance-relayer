@@ -333,25 +333,36 @@ impl DatabaseClient for PostgresClient {
         Ok(())
     }
 
+    /// Get pending blockchain requests and atomically claim them for processing.
+    /// Uses UPDATE...RETURNING with FOR UPDATE SKIP LOCKED to prevent race conditions.
+    /// Returned rows are already in 'processing' status.
     #[instrument(skip(self))]
     async fn get_pending_blockchain_requests(
         &self,
         limit: i64,
     ) -> Result<Vec<TransferRequest>, AppError> {
         let now = Utc::now();
+        // Atomic claim: SELECT eligible rows with FOR UPDATE SKIP LOCKED,
+        // UPDATE them to 'processing', and RETURN them in one operation.
+        // This prevents race conditions when multiple worker replicas are running.
         let rows = sqlx::query(
             r#"
-            SELECT id, from_address, to_address, amount, token_mint, compliance_status,
-                   blockchain_status, blockchain_signature, blockchain_retry_count,
-                   blockchain_last_error, blockchain_next_retry_at,
-                   created_at, updated_at
-            FROM transfer_requests
-            WHERE blockchain_status = 'pending_submission'
-              AND compliance_status = 'approved'
-              AND (blockchain_next_retry_at IS NULL OR blockchain_next_retry_at <= $1)
-              AND blockchain_retry_count < 10
-            ORDER BY blockchain_next_retry_at ASC NULLS FIRST, created_at ASC
-            LIMIT $2
+            UPDATE transfer_requests
+            SET blockchain_status = 'processing',
+                updated_at = NOW()
+            WHERE id IN (
+                SELECT id FROM transfer_requests
+                WHERE blockchain_status = 'pending_submission'
+                  AND compliance_status = 'approved'
+                  AND (blockchain_next_retry_at IS NULL OR blockchain_next_retry_at <= $1)
+                  AND blockchain_retry_count < 10
+                ORDER BY blockchain_next_retry_at ASC NULLS FIRST, created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, from_address, to_address, amount, token_mint, compliance_status,
+                      blockchain_status, blockchain_signature, blockchain_retry_count,
+                      blockchain_last_error, blockchain_next_retry_at, created_at, updated_at
             "#,
         )
         .bind(now)

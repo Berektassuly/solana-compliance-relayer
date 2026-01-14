@@ -12,8 +12,10 @@ pub enum BlockchainStatus {
     /// Initial state, not yet processed
     #[default]
     Pending,
-    /// Waiting to be submitted to blockchain
+    /// Waiting to be submitted to blockchain (queued for worker)
     PendingSubmission,
+    /// Worker has claimed this task, processing in progress
+    Processing,
     /// Transaction submitted, awaiting confirmation
     Submitted,
     /// Transaction confirmed on blockchain
@@ -27,6 +29,7 @@ impl BlockchainStatus {
         match self {
             Self::Pending => "pending",
             Self::PendingSubmission => "pending_submission",
+            Self::Processing => "processing",
             Self::Submitted => "submitted",
             Self::Confirmed => "confirmed",
             Self::Failed => "failed",
@@ -41,6 +44,7 @@ impl std::str::FromStr for BlockchainStatus {
         match s {
             "pending" => Ok(Self::Pending),
             "pending_submission" => Ok(Self::PendingSubmission),
+            "processing" => Ok(Self::Processing),
             "submitted" => Ok(Self::Submitted),
             "confirmed" => Ok(Self::Confirmed),
             "failed" => Ok(Self::Failed),

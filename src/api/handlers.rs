@@ -66,15 +66,22 @@ pub struct ApiDoc;
 
 /// Submit a new transfer request
 ///
-/// Submits a transfer for compliance screening. If the recipient address
-/// is flagged by the compliance provider, the transfer will be rejected.
+/// Accepts a transfer for processing. The request is validated, screened
+/// for compliance, and queued for blockchain submission by background workers.
+///
+/// **Response indicates acceptance, not blockchain confirmation.**
+/// Poll `GET /transfer-requests/{id}` to track `blockchain_status` progression:
+/// - `pending_submission` → queued for worker
+/// - `processing` → worker is submitting
+/// - `submitted` → on-chain, awaiting confirmation
+/// - `confirmed` → finalized on blockchain
 #[utoipa::path(
     post,
     path = "/transfer-requests",
     tag = "transfers",
     request_body = SubmitTransferRequest,
     responses(
-        (status = 200, description = "Transfer request accepted (check compliance_status for approval)", body = TransferRequest),
+        (status = 200, description = "Transfer accepted for processing (blockchain_status will be 'pending_submission')", body = TransferRequest),
         (status = 400, description = "Validation error - invalid request format", body = ErrorResponse),
         (status = 429, description = "Rate limit exceeded", body = RateLimitResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),

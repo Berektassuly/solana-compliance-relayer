@@ -213,14 +213,17 @@ impl DatabaseClient for MockDatabaseClient {
         Ok(())
     }
 
+    /// Mock atomic claim: returns items with Processing status (like the real implementation)
     async fn get_pending_blockchain_requests(
         &self,
         limit: i64,
     ) -> Result<Vec<TransferRequest>, AppError> {
         self.check_should_fail()?;
-        let storage = self.storage.lock().unwrap();
+        let mut storage = self.storage.lock().unwrap();
         let now = Utc::now();
-        let mut items: Vec<TransferRequest> = storage
+
+        // Find eligible items
+        let eligible_ids: Vec<String> = storage
             .values()
             .filter(|i| {
                 i.blockchain_status == BlockchainStatus::PendingSubmission
@@ -228,10 +231,22 @@ impl DatabaseClient for MockDatabaseClient {
                     && i.blockchain_retry_count < 10
                     && i.blockchain_next_retry_at.map(|t| t <= now).unwrap_or(true)
             })
-            .cloned()
+            .take(limit as usize)
+            .map(|i| i.id.clone())
             .collect();
-        items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        Ok(items.into_iter().take(limit as usize).collect())
+
+        // Atomically update status to Processing and return claimed items
+        let mut claimed_items = Vec::new();
+        for id in eligible_ids {
+            if let Some(item) = storage.get_mut(&id) {
+                item.blockchain_status = BlockchainStatus::Processing;
+                item.updated_at = Utc::now();
+                claimed_items.push(item.clone());
+            }
+        }
+
+        claimed_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(claimed_items)
     }
 
     async fn increment_retry_count(&self, id: &str) -> Result<i32, AppError> {

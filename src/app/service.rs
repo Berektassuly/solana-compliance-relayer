@@ -38,8 +38,9 @@ impl AppService {
         }
     }
 
-    /// Submit a new transfer request and attempt blockchain submission.
-    /// If blockchain is unavailable, stores request with pending_submission status.
+    /// Submit a new transfer request for background processing.
+    /// Validates, checks compliance, persists to database, and returns immediately.
+    /// Blockchain submission is handled asynchronously by background workers.
     #[instrument(skip(self, request), fields(from = %request.from_address, to = %request.to_address))]
     pub async fn submit_transfer(
         &self,
@@ -52,73 +53,41 @@ impl AppService {
 
         info!("Submitting new transfer request");
 
-        // Compliance check
+        // Compliance check (synchronous - fast)
         let compliance_status = self.compliance_provider.check_compliance(request).await?;
         if compliance_status == crate::domain::ComplianceStatus::Rejected {
             warn!(from = %request.from_address, to = %request.to_address, "Transfer rejected by compliance provider");
         }
 
+        // Persist to database (single source of truth)
         let mut transfer_request = self.db_client.submit_transfer(request).await?;
 
+        // Update compliance status
         if compliance_status != crate::domain::ComplianceStatus::Pending {
             self.db_client
                 .update_compliance_status(&transfer_request.id, compliance_status)
                 .await?;
         }
-
         transfer_request.compliance_status = compliance_status;
 
-        // If rejected, stop here.
+        // If rejected, return early - no blockchain submission needed
         if compliance_status == crate::domain::ComplianceStatus::Rejected {
             return Ok(transfer_request);
         }
 
-        transfer_request.compliance_status = compliance_status;
+        // Queue for background processing (Outbox Pattern: no blockchain call here!)
+        self.db_client
+            .update_blockchain_status(
+                &transfer_request.id,
+                BlockchainStatus::PendingSubmission,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        transfer_request.blockchain_status = BlockchainStatus::PendingSubmission;
 
-        // If rejected, we likely need to return early.
-        if compliance_status == crate::domain::ComplianceStatus::Rejected {
-            return Ok(transfer_request);
-        }
-
-        info!(id = %transfer_request.id, "Transfer request created in database");
-
-        // Attempt blockchain submission with graceful degradation
-        match self
-            .blockchain_client
-            .submit_transaction(&transfer_request)
-            .await
-        {
-            Ok(signature) => {
-                info!(id = %transfer_request.id, signature = %signature, "Submitted to blockchain");
-                self.db_client
-                    .update_blockchain_status(
-                        &transfer_request.id,
-                        BlockchainStatus::Submitted,
-                        Some(&signature),
-                        None,
-                        None,
-                    )
-                    .await?;
-                transfer_request.blockchain_status = BlockchainStatus::Submitted;
-                transfer_request.blockchain_signature = Some(signature);
-            }
-            Err(e) => {
-                warn!(id = %transfer_request.id, error = ?e, "Blockchain submission failed, queuing for retry");
-                let next_retry = Utc::now() + Duration::seconds(1);
-                self.db_client
-                    .update_blockchain_status(
-                        &transfer_request.id,
-                        BlockchainStatus::PendingSubmission,
-                        None,
-                        Some(&e.to_string()),
-                        Some(next_retry),
-                    )
-                    .await?;
-                transfer_request.blockchain_status = BlockchainStatus::PendingSubmission;
-                transfer_request.blockchain_last_error = Some(e.to_string());
-                transfer_request.blockchain_next_retry_at = Some(next_retry);
-            }
-        }
+        info!(id = %transfer_request.id, "Transfer accepted for background processing");
 
         Ok(transfer_request)
     }
