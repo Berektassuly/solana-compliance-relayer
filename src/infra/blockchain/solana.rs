@@ -17,7 +17,7 @@ use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::{
-    instruction::Instruction,
+    instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signer::{Signer as SolanaSigner, keypair::Keypair},
     transaction::Transaction,
@@ -373,75 +373,7 @@ impl RpcBlockchainClient {
         }
     }
 
-    /// Build and serialize a memo transaction
-    #[cfg(feature = "real-blockchain")]
-    fn build_memo_transaction(
-        &self,
-        memo: &str,
-        recent_blockhash: &str,
-    ) -> Result<String, AppError> {
-        // Memo program ID
-        let memo_program_id = bs58::decode("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
-            .into_vec()
-            .map_err(|e| AppError::Blockchain(BlockchainError::InvalidSignature(e.to_string())))?;
 
-        let recent_blockhash_bytes = bs58::decode(recent_blockhash)
-            .into_vec()
-            .map_err(|e| AppError::Blockchain(BlockchainError::InvalidSignature(e.to_string())))?;
-
-        let public_key_bytes: Vec<u8> =
-            bs58::decode(self.provider.public_key()).into_vec().unwrap(); // Should always be valid base58 from provider
-
-        // Build a simplified transaction structure
-        // This is a minimal memo transaction
-        let mut tx_data = vec![
-            1u8, // sig count
-            2u8, // num accounts
-        ];
-
-        // Number of signatures
-        tx_data.push(1u8);
-
-        // Message header
-        tx_data.push(1u8); // num_required_signatures
-        tx_data.push(0u8); // num_readonly_signed_accounts
-        tx_data.push(1u8); // num_readonly_unsigned_accounts
-
-        // Account keys (payer + memo program)
-        tx_data.push(2u8); // num accounts
-        tx_data.extend_from_slice(&public_key_bytes);
-        tx_data.extend_from_slice(&memo_program_id);
-
-        // Recent blockhash
-        tx_data.extend_from_slice(&recent_blockhash_bytes);
-
-        // Instructions
-        tx_data.push(1u8); // num instructions
-
-        // Memo instruction
-        tx_data.push(1u8); // program_id_index (memo program)
-        tx_data.push(1u8); // num accounts
-        tx_data.push(0u8); // account index (payer)
-
-        // Memo data
-        let memo_bytes = memo.as_bytes();
-        tx_data.push(memo_bytes.len() as u8);
-        tx_data.extend_from_slice(memo_bytes);
-
-        // Sign the message (everything after signatures)
-        let _message_start = 1 + 64; // 1 byte for sig count, 64 bytes for signature placeholder
-        let message = &tx_data[1..]; // Skip signature count
-
-        let signature_str = self.provider.sign(message);
-        let signature_bytes = bs58::decode(signature_str).into_vec().unwrap();
-
-        // Insert signature
-        let mut final_tx = vec![1u8]; // signature count
-        final_tx.extend_from_slice(&signature_bytes);
-        final_tx.extend_from_slice(message);
-
-        Ok(bs58::encode(&final_tx).into_string())
-    }
 
     /// Build and serialize a System Program transfer transaction
     /// Uses manual byte construction for the "Hardcore" approach
@@ -573,32 +505,72 @@ impl BlockchainClient for RpcBlockchainClient {
     async fn submit_transaction(&self, request: &TransferRequest) -> Result<String, AppError> {
         info!(id = %request.id, "Submitting transaction for request");
 
-        #[cfg(feature = "real-blockchain")]
-        {
-            // Get recent blockhash
-            let blockhash = self.get_latest_blockhash().await?;
-            debug!(blockhash = %blockhash, "Got recent blockhash");
+        // Check if we have SDK client and keypair
+        let (sdk_client, keypair) = match (&self.sdk_client, &self.keypair) {
+            (Some(client), Some(kp)) => (client, kp),
+            _ => {
+                // Mock implementation for testing (when SDK client not available)
+                debug!("Using mock implementation for submit_transaction");
+                let signature = self.sign(request.id.as_bytes());
+                return Ok(format!("tx_{}", &signature[..16]));
+            }
+        };
 
-            // Build and sign transaction
-            // For now, we use the request ID as the memo content
-            let memo = format!("Compliance Relayer Approval: {}", request.id);
-            let tx = self.build_memo_transaction(&memo, &blockhash)?;
-            debug!("Built memo transaction");
+        // SPL Memo Program ID
+        let memo_program_id = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+            .parse::<Pubkey>()
+            .map_err(|e| {
+                AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                    "Invalid memo program ID: {}",
+                    e
+                )))
+            })?;
 
-            // Send transaction
-            let params = serde_json::json!([tx, {"encoding": "base58"}]);
-            let signature: String = self.rpc_call("sendTransaction", params).await?;
-            info!(signature = %signature, "Transaction sent");
+        // Build memo content
+        let memo_data = format!("Compliance Relayer Approval: {}", request.id);
 
-            Ok(signature)
-        }
+        // Create Memo instruction
+        // The memo program requires the signer account to be passed
+        let memo_ix = Instruction::new_with_bytes(
+            memo_program_id,
+            memo_data.as_bytes(),
+            vec![AccountMeta::new(keypair.pubkey(), true)], // signer
+        );
 
-        #[cfg(not(feature = "real-blockchain"))]
-        {
-            // Mock implementation for testing
-            let signature = self.sign(request.id.as_bytes());
-            Ok(format!("tx_{}", &signature[..16]))
-        }
+        // Get priority fee (gracefully falls back to default if QuickNode not available)
+        let priority_fee = self.get_quicknode_priority_fee().await;
+
+        // Build instructions with compute budget for priority fee
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
+            memo_ix,
+        ];
+
+        // Get recent blockhash using SDK
+        let recent_blockhash = sdk_client
+            .get_latest_blockhash()
+            .await
+            .map_err(map_solana_client_error)?;
+
+        debug!(blockhash = %recent_blockhash, "Got recent blockhash via SDK");
+
+        // Build and sign transaction using SDK
+        let transaction = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&keypair.pubkey()),
+            &[keypair],
+            recent_blockhash,
+        );
+
+        // Send and confirm transaction
+        let signature = sdk_client
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(map_solana_client_error)?;
+
+        info!(signature = %signature, "Memo transaction submitted via SDK");
+
+        Ok(signature.to_string())
     }
 
     #[instrument(skip(self))]
