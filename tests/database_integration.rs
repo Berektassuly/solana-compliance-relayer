@@ -54,7 +54,7 @@ async fn test_create_and_get_transfer_request() {
     let request = SubmitTransferRequest {
         from_address: "From1".to_string(),
         to_address: "To1".to_string(),
-        amount_sol: 100.0,
+        amount: 100_000_000_000, // 100 SOL in lamports
         token_mint: None,
     };
 
@@ -65,7 +65,7 @@ async fn test_create_and_get_transfer_request() {
         .expect("Failed to submit transfer");
     assert_eq!(created.from_address, "From1");
     assert_eq!(created.to_address, "To1");
-    assert_eq!(created.amount_sol, 100.0);
+    assert_eq!(created.amount, 100_000_000_000);
     assert!(!created.id.is_empty());
 
     // Get item
@@ -88,7 +88,7 @@ async fn test_list_requests_pagination() {
         let request = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
-            amount_sol: i as f64,
+            amount: (i as u64) * 1_000_000_000, // i SOL in lamports
             token_mint: None,
         };
         client
@@ -133,7 +133,7 @@ async fn test_blockchain_status_updates() {
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount_sol: 1.0,
+        amount: 1_000_000_000,
         token_mint: None,
     };
     let created = client
@@ -201,7 +201,7 @@ async fn test_get_pending_blockchain_requests() {
         let request = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
-            amount_sol: 1.0,
+            amount: 1_000_000_000,
             token_mint: None,
         };
         let item = client
@@ -265,7 +265,7 @@ async fn test_increment_retry_count() {
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount_sol: 1.0,
+        amount: 1_000_000_000,
         token_mint: None,
     };
     let created = client

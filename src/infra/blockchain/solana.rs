@@ -396,27 +396,26 @@ impl BlockchainClient for RpcBlockchainClient {
         // Dispatch to the appropriate transfer method based on token_mint
         match &request.token_mint {
             Some(mint) => {
-                // SPL Token transfer
+                // SPL Token transfer - amount is in raw token units
                 info!(
                     id = %request.id,
                     mint = %mint,
-                    amount = %request.amount_sol,
+                    amount = %request.amount,
                     to = %request.to_address,
                     "Dispatching SPL Token transfer"
                 );
-                self.transfer_token(&request.to_address, mint, request.amount_sol)
+                self.transfer_token(&request.to_address, mint, request.amount)
                     .await
             }
             None => {
-                // Native SOL transfer
+                // Native SOL transfer - amount is in lamports
                 info!(
                     id = %request.id,
-                    amount_sol = %request.amount_sol,
+                    amount_lamports = %request.amount,
                     to = %request.to_address,
                     "Dispatching native SOL transfer"
                 );
-                self.transfer_sol(&request.to_address, request.amount_sol)
-                    .await
+                self.transfer_sol(&request.to_address, request.amount).await
             }
         }
     }
@@ -494,14 +493,15 @@ impl BlockchainClient for RpcBlockchainClient {
     }
 
     #[instrument(skip(self))]
-    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
-        // Convert SOL to lamports (1 SOL = 1_000_000_000 lamports)
-        let lamports = (amount_sol * 1_000_000_000.0) as u64;
-
-        info!(to = %to_address, amount_sol = %amount_sol, lamports = %lamports, "Transferring SOL");
+    async fn transfer_sol(
+        &self,
+        to_address: &str,
+        amount_lamports: u64,
+    ) -> Result<String, AppError> {
+        info!(to = %to_address, amount_lamports = %amount_lamports, "Transferring SOL");
 
         // Validate amount
-        if lamports == 0 {
+        if amount_lamports == 0 {
             return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
                 "Transfer amount must be greater than 0".to_string(),
             )));
@@ -529,7 +529,8 @@ impl BlockchainClient for RpcBlockchainClient {
         let priority_fee = self.get_quicknode_priority_fee().await;
 
         // Create transfer instruction using SDK
-        let transfer_ix = system_instruction::transfer(&keypair.pubkey(), &to_pubkey, lamports);
+        let transfer_ix =
+            system_instruction::transfer(&keypair.pubkey(), &to_pubkey, amount_lamports);
 
         // Build instructions with compute budget for priority fee
         let instructions = vec![
@@ -557,7 +558,7 @@ impl BlockchainClient for RpcBlockchainClient {
             .await
             .map_err(map_solana_client_error)?;
 
-        info!(signature = %signature, to = %to_address, lamports = %lamports, "SOL transfer submitted via SDK");
+        info!(signature = %signature, to = %to_address, amount_lamports = %amount_lamports, "SOL transfer submitted via SDK");
 
         Ok(signature.to_string())
     }
@@ -567,12 +568,12 @@ impl BlockchainClient for RpcBlockchainClient {
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: f64,
+        amount: u64,
     ) -> Result<String, AppError> {
-        info!(to = %to_address, token_mint = %token_mint, amount = %amount, "Transferring SPL Token");
+        info!(to = %to_address, token_mint = %token_mint, amount = %amount, "Transferring SPL Token (raw units)");
 
         // Validate amount
-        if amount <= 0.0 {
+        if amount == 0 {
             return Err(AppError::Blockchain(BlockchainError::TransactionFailed(
                 "Transfer amount must be greater than 0".to_string(),
             )));
@@ -604,7 +605,7 @@ impl BlockchainClient for RpcBlockchainClient {
         })?;
 
         // Fetch the mint account to determine the correct token program ID and decimals
-        // This handles both legacy SPL Token and Token-2022
+        // This is required for transfer_checked instruction (validates decimals) and Token-2022 support
         let mint_account = sdk_client.get_account(&mint_pubkey).await.map_err(|e| {
             AppError::Blockchain(BlockchainError::TransactionFailed(format!(
                 "Failed to fetch mint account: {}",
@@ -616,9 +617,9 @@ impl BlockchainClient for RpcBlockchainClient {
         let token_program_id = mint_account.owner;
         debug!(token_program_id = %token_program_id, "Detected token program from mint");
 
-        // Extract decimals from mint account data manually
+        // Extract decimals from mint account data (required for transfer_checked)
         // Mint layout (both SPL Token and Token-2022):
-        // - bytes 0-3: mint_authority option (1 byte option flag + 32 bytes pubkey if Some)
+        // - bytes 0-35: mint_authority option (1 byte option flag + up to 32 bytes pubkey)
         // - bytes 36-43: supply (u64)
         // - byte 44: decimals (u8)
         // - byte 45: is_initialized (bool)
@@ -637,12 +638,7 @@ impl BlockchainClient for RpcBlockchainClient {
         }
 
         let decimals = mint_account.data[DECIMALS_OFFSET];
-        debug!(decimals = %decimals, "Read decimals from mint account");
-
-        // Convert human-readable amount to raw token units
-        // e.g., 1.5 USDC (6 decimals) -> 1_500_000 raw units
-        let raw_amount = (amount * 10f64.powi(decimals as i32)) as u64;
-        info!(raw_amount = %raw_amount, decimals = %decimals, "Calculated raw token amount");
+        debug!(decimals = %decimals, "Read decimals from mint account (needed for transfer_checked)");
 
         // Derive Associated Token Accounts with the correct token program ID
         let source_ata = get_associated_token_address_with_program_id(
@@ -695,9 +691,9 @@ impl BlockchainClient for RpcBlockchainClient {
                 .try_into()
                 .unwrap();
             let balance = u64::from_le_bytes(balance_bytes);
-            debug!(source_balance = %balance, required = %raw_amount, "Checking source token balance");
+            debug!(source_balance = %balance, required = %amount, "Checking source token balance");
 
-            if balance < raw_amount {
+            if balance < amount {
                 return Err(AppError::Blockchain(BlockchainError::InsufficientFunds));
             }
         }
@@ -729,6 +725,8 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Create SPL Token transfer_checked instruction for safer transfers
         // transfer_checked validates the mint and decimals, providing better error messages
+        // Note: We pass the raw `amount` directly (already in token units), but still need
+        // `decimals` for the transfer_checked instruction validation
         let transfer_ix = token_instruction::transfer_checked(
             &token_program_id,
             &source_ata,
@@ -736,8 +734,8 @@ impl BlockchainClient for RpcBlockchainClient {
             &destination_ata,
             &keypair.pubkey(), // authority (owner of source account)
             &[],               // no multisig signers
-            raw_amount,
-            decimals,
+            amount,            // already in raw token units
+            decimals,          // required by transfer_checked for validation
         )
         .map_err(|e| {
             AppError::Blockchain(BlockchainError::TransactionFailed(format!(
@@ -773,8 +771,8 @@ impl BlockchainClient for RpcBlockchainClient {
             to = %to_address,
             token_mint = %token_mint,
             amount = %amount,
-            raw_amount = %raw_amount,
-            "SPL Token transfer submitted"
+            decimals = %decimals,
+            "SPL Token transfer submitted (raw units)"
         );
 
         Ok(signature.to_string())

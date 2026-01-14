@@ -121,7 +121,7 @@ impl DatabaseClient for MockDatabaseClient {
             id: id.clone(),
             from_address: data.from_address.clone(),
             to_address: data.to_address.clone(),
-            amount_sol: data.amount_sol,
+            amount: data.amount,
             token_mint: data.token_mint.clone(),
             compliance_status,
             blockchain_status: BlockchainStatus::Pending,
@@ -348,17 +348,19 @@ impl BlockchainClient for MockBlockchainClient {
         Ok("mock_blockhash_abc123".to_string())
     }
 
-    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
+    async fn transfer_sol(
+        &self,
+        to_address: &str,
+        amount_lamports: u64,
+    ) -> Result<String, AppError> {
         self.check_should_fail()?;
-        // Convert to lamports for the signature generation
-        let lamports = (amount_sol * 1_000_000_000.0) as u64;
         let signature = format!(
             "transfer_sig_{}_{}",
             &to_address[..8.min(to_address.len())],
-            lamports
+            amount_lamports
         );
         let mut transactions = self.transactions.lock().unwrap();
-        transactions.push(format!("transfer:{}:{}", to_address, lamports));
+        transactions.push(format!("transfer:{}:{}", to_address, amount_lamports));
         Ok(signature)
     }
 
@@ -366,17 +368,15 @@ impl BlockchainClient for MockBlockchainClient {
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: f64,
+        amount: u64,
     ) -> Result<String, AppError> {
         self.check_should_fail()?;
         let mint_prefix = &token_mint[..8.min(token_mint.len())];
-        // For mock, assume 6 decimals like USDC
-        let raw_amount = (amount * 1_000_000.0) as u64;
-        let signature = format!("token_sig_{}_{}", mint_prefix, raw_amount);
+        let signature = format!("token_sig_{}_{}", mint_prefix, amount);
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
             "token_transfer:{}:{}:{}",
-            to_address, token_mint, raw_amount
+            to_address, token_mint, amount
         ));
         Ok(signature)
     }

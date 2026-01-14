@@ -342,7 +342,7 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "sender".to_string(),
             to_address: "receiver".to_string(),
-            amount_sol: 1.0,
+            amount: 1_000_000_000,
             token_mint: None,
         };
         let result = provider.check_compliance(&request).await;
@@ -355,7 +355,7 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "sender".to_string(),
             to_address: "hackBadWallet".to_string(),
-            amount_sol: 1.0,
+            amount: 1_000_000_000,
             token_mint: None,
         };
         let result = provider.check_compliance(&request).await;

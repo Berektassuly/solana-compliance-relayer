@@ -117,9 +117,14 @@ pub trait BlockchainClient: Send + Sync {
     }
 
     /// Transfer SOL from the issuer wallet to a destination address
+    /// Amount is in lamports (1 SOL = 1_000_000_000 lamports)
     /// Returns the transaction signature on success
-    async fn transfer_sol(&self, to_address: &str, amount_sol: f64) -> Result<String, AppError> {
-        let _ = (to_address, amount_sol);
+    async fn transfer_sol(
+        &self,
+        to_address: &str,
+        amount_lamports: u64,
+    ) -> Result<String, AppError> {
+        let _ = (to_address, amount_lamports);
         Err(AppError::NotSupported(
             "transfer_sol not implemented".to_string(),
         ))
@@ -127,14 +132,14 @@ pub trait BlockchainClient: Send + Sync {
 
     /// Transfer SPL Tokens from the issuer wallet to a destination address
     /// Creates the destination ATA if it doesn't exist
-    /// The amount is in human-readable units (e.g., 1.5 USDC), not raw token units
-    /// Decimals are read dynamically from the mint account
+    /// Amount is in raw token units (caller must pre-convert using token decimals)
+    /// Example: 1 USDC (6 decimals) = 1_000_000 raw units
     /// Returns the transaction signature on success
     async fn transfer_token(
         &self,
         to_address: &str,
         token_mint: &str,
-        amount: f64,
+        amount: u64,
     ) -> Result<String, AppError> {
         let _ = (to_address, token_mint, amount);
         Err(AppError::NotSupported(

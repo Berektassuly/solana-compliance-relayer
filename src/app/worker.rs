@@ -458,7 +458,7 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "AddressA".to_string(),
             to_address: "AddressB".to_string(),
-            amount_sol: 1.5,
+            amount: 1_500_000_000, // 1.5 SOL in lamports
             token_mint: None,
         };
         let tr = db.submit_transfer(&request).await.unwrap();

@@ -109,9 +109,10 @@ pub struct TransferRequest {
     /// Recipient wallet address (Base58 Solana address)
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount of SOL (or token units) to transfer
-    #[schema(example = 0.5)]
-    pub amount_sol: f64,
+    /// Amount in atomic units (lamports for SOL, raw units for SPL tokens)
+    /// Example: 1_000_000_000 = 1 SOL, 1_000_000 = 1 USDC (6 decimals)
+    #[schema(example = 1_000_000_000)]
+    pub amount: u64,
     /// Optional SPL Token mint address. None means native SOL transfer.
     #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -137,13 +138,13 @@ pub struct TransferRequest {
 
 impl TransferRequest {
     #[must_use]
-    pub fn new(id: String, from_address: String, to_address: String, amount_sol: f64) -> Self {
+    pub fn new(id: String, from_address: String, to_address: String, amount: u64) -> Self {
         let now = Utc::now();
         Self {
             id,
             from_address,
             to_address,
-            amount_sol,
+            amount,
             token_mint: None,
             compliance_status: ComplianceStatus::Pending,
             blockchain_status: BlockchainStatus::Pending,
@@ -162,7 +163,7 @@ impl TransferRequest {
         id: String,
         from_address: String,
         to_address: String,
-        amount: f64,
+        amount: u64,
         token_mint: String,
     ) -> Self {
         let mut request = Self::new(id, from_address, to_address, amount);
@@ -183,7 +184,7 @@ impl Default for TransferRequest {
             "default_id".to_string(),
             "default_from".to_string(),
             "default_to".to_string(),
-            0.0,
+            0,
         )
     }
 }
@@ -199,10 +200,11 @@ pub struct SubmitTransferRequest {
     #[validate(length(min = 1, message = "To address is required"))]
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount of SOL (or tokens) to transfer
-    #[validate(range(min = 0.000000001, message = "Amount must be greater than 0"))]
-    #[schema(example = 0.5)]
-    pub amount_sol: f64,
+    /// Amount in atomic units (lamports for SOL, raw units for SPL tokens)
+    /// Example: 1_000_000_000 = 1 SOL, 1_000_000 = 1 USDC (6 decimals)
+    #[validate(range(min = 1, message = "Amount must be at least 1 atomic unit"))]
+    #[schema(example = 1_000_000_000)]
+    pub amount: u64,
     /// Optional SPL Token mint address. If None, this is a native SOL transfer.
     /// If Some, this is an SPL Token transfer for the specified mint.
     #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
@@ -212,11 +214,11 @@ pub struct SubmitTransferRequest {
 
 impl SubmitTransferRequest {
     #[must_use]
-    pub fn new(from_address: String, to_address: String, amount_sol: f64) -> Self {
+    pub fn new(from_address: String, to_address: String, amount: u64) -> Self {
         Self {
             from_address,
             to_address,
-            amount_sol,
+            amount,
             token_mint: None,
         }
     }
@@ -226,13 +228,13 @@ impl SubmitTransferRequest {
     pub fn new_token_transfer(
         from_address: String,
         to_address: String,
-        amount: f64,
+        amount: u64,
         token_mint: String,
     ) -> Self {
         Self {
             from_address,
             to_address,
-            amount_sol: amount,
+            amount,
             token_mint: Some(token_mint),
         }
     }
@@ -435,20 +437,20 @@ mod tests {
 
     #[test]
     fn test_submit_transfer_request_validation() {
-        // Valid request
-        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 1.0);
+        // Valid request (1 SOL in lamports)
+        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 1_000_000_000);
         assert!(req.validate().is_ok());
 
         // Invalid From (empty)
-        let req = SubmitTransferRequest::new("".to_string(), "To".to_string(), 1.0);
+        let req = SubmitTransferRequest::new("".to_string(), "To".to_string(), 1_000_000_000);
         assert!(req.validate().is_err());
 
         // Invalid To (empty)
-        let req = SubmitTransferRequest::new("From".to_string(), "".to_string(), 1.0);
+        let req = SubmitTransferRequest::new("From".to_string(), "".to_string(), 1_000_000_000);
         assert!(req.validate().is_err());
 
         // Invalid Amount (zero)
-        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0.0);
+        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0);
         assert!(req.validate().is_err());
     }
 
@@ -458,7 +460,7 @@ mod tests {
             "id_123".to_string(),
             "from_123".to_string(),
             "to_123".to_string(),
-            10.5,
+            10_500_000_000, // 10.5 SOL in lamports
         );
 
         assert_eq!(req.compliance_status, ComplianceStatus::Pending);
@@ -475,7 +477,7 @@ mod tests {
             "tr_123".to_string(),
             "from_abc".to_string(),
             "to_xyz".to_string(),
-            5.0,
+            5_000_000_000, // 5 SOL in lamports
         );
 
         let json = serde_json::to_string(&req).unwrap();
@@ -484,6 +486,6 @@ mod tests {
         assert_eq!(deserialized.id, "tr_123");
         assert_eq!(deserialized.from_address, "from_abc");
         assert_eq!(deserialized.to_address, "to_xyz");
-        assert_eq!(deserialized.amount_sol, 5.0);
+        assert_eq!(deserialized.amount, 5_000_000_000);
     }
 }

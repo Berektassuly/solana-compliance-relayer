@@ -242,18 +242,17 @@ impl AppService {
         // Choose transfer type based on token_mint presence
         let result = match &request.token_mint {
             Some(mint) => {
-                // SPL Token transfer - pass human-readable amount directly
-                // Decimals are read from the mint account by the blockchain client
-                info!(id = %request.id, mint = %mint, amount = %request.amount_sol, "Processing SPL Token transfer");
+                // SPL Token transfer - amount is already in raw token units
+                info!(id = %request.id, mint = %mint, amount = %request.amount, "Processing SPL Token transfer");
                 self.blockchain_client
-                    .transfer_token(&request.to_address, mint, request.amount_sol)
+                    .transfer_token(&request.to_address, mint, request.amount)
                     .await
             }
             None => {
-                // Native SOL transfer
-                info!(id = %request.id, amount_sol = %request.amount_sol, "Processing native SOL transfer");
+                // Native SOL transfer - amount is already in lamports
+                info!(id = %request.id, amount_lamports = %request.amount, "Processing native SOL transfer");
                 self.blockchain_client
-                    .transfer_sol(&request.to_address, request.amount_sol)
+                    .transfer_sol(&request.to_address, request.amount)
                     .await
             }
         };
