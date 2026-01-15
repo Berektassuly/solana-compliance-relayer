@@ -127,7 +127,7 @@ pub fn spawn_worker(
 mod tests {
     use super::*;
     use crate::domain::{
-        BlockchainStatus, ComplianceStatus, DatabaseClient, SubmitTransferRequest,
+        BlockchainStatus, ComplianceStatus, DatabaseClient, SubmitTransferRequest, TransferType,
     };
     use crate::test_utils::{
         MockBlockchainClient, MockComplianceProvider, MockConfig, MockDatabaseClient,
@@ -458,7 +458,9 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "AddressA".to_string(),
             to_address: "AddressB".to_string(),
-            amount: 1_500_000_000, // 1.5 SOL in lamports
+            transfer_details: TransferType::Public {
+                amount: 1_500_000_000,
+            },
             token_mint: None,
         };
         let tr = db.submit_transfer(&request).await.unwrap();

@@ -6,6 +6,7 @@ use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use std::time::Duration;
 use tracing::{info, instrument};
 
+use crate::domain::types::TransferType;
 use crate::domain::{
     AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, PaginatedResponse,
     SubmitTransferRequest, TransferRequest,
@@ -82,12 +83,28 @@ impl PostgresClient {
         let compliance_status_str: String = row.get("compliance_status");
         let blockchain_status_str: String = row.get("blockchain_status");
 
+        // New fields for confidential transfers
+        let transfer_type_str: Option<String> = row.try_get("transfer_type").ok();
+        let amount_opt: Option<i64> = row.get("amount");
+        let proof_data: Option<String> = row.try_get("proof_data").ok();
+        let encrypted_amount: Option<String> = row.try_get("encrypted_amount").ok();
+
+        let transfer_details = match transfer_type_str.as_deref() {
+            Some("confidential") => TransferType::Confidential {
+                proof_data: proof_data.unwrap_or_default(),
+                encrypted_amount: encrypted_amount.unwrap_or_default(),
+            },
+            // Default to Public if "public" or unknown/null (backward compatibility)
+            _ => TransferType::Public {
+                amount: amount_opt.unwrap_or(0) as u64,
+            },
+        };
+
         Ok(TransferRequest {
             id: row.get("id"),
             from_address: row.get("from_address"),
             to_address: row.get("to_address"),
-            // PostgreSQL BIGINT is i64; cast to u64 (safe since amounts are always positive)
-            amount: row.get::<i64, _>("amount") as u64,
+            transfer_details,
             token_mint: row.get("token_mint"),
             compliance_status: compliance_status_str
                 .parse()
@@ -123,7 +140,8 @@ impl DatabaseClient for PostgresClient {
             SELECT id, from_address, to_address, amount, token_mint, compliance_status,
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
-                   created_at, updated_at 
+                   created_at, updated_at,
+                   transfer_type, proof_data, encrypted_amount
             FROM transfer_requests 
             WHERE id = $1
             "#,
@@ -139,7 +157,7 @@ impl DatabaseClient for PostgresClient {
         }
     }
 
-    #[instrument(skip(self, data), fields(from = %data.from_address, to = %data.to_address, amount = %data.amount))]
+    #[instrument(skip(self, data), fields(from = %data.from_address, to = %data.to_address))]
     async fn submit_transfer(
         &self,
         data: &SubmitTransferRequest,
@@ -147,26 +165,44 @@ impl DatabaseClient for PostgresClient {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
+        let (transfer_type_str, amount, proof_data, encrypted_amount) = match &data.transfer_details
+        {
+            TransferType::Public { amount } => ("public", Some(*amount as i64), None, None),
+            TransferType::Confidential {
+                proof_data,
+                encrypted_amount,
+            } => (
+                "confidential",
+                None,
+                Some(proof_data.clone()),
+                Some(encrypted_amount.clone()),
+            ),
+        };
+
         sqlx::query(
             r#"
             INSERT INTO transfer_requests (
                 id, from_address, to_address, amount, token_mint,
                 compliance_status, blockchain_status, blockchain_retry_count,
-                created_at, updated_at
+                created_at, updated_at,
+                transfer_type, proof_data, encrypted_amount
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(&id)
         .bind(&data.from_address)
         .bind(&data.to_address)
-        .bind(data.amount as i64)
+        .bind(amount)
         .bind(data.token_mint.as_deref())
         .bind(ComplianceStatus::Pending.as_str())
         .bind(BlockchainStatus::Pending.as_str())
         .bind(0i32)
         .bind(now)
         .bind(now)
+        .bind(transfer_type_str)
+        .bind(proof_data)
+        .bind(encrypted_amount)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Database(DatabaseError::from(e)))?;
@@ -175,7 +211,7 @@ impl DatabaseClient for PostgresClient {
             id,
             from_address: data.from_address.clone(),
             to_address: data.to_address.clone(),
-            amount: data.amount,
+            transfer_details: data.transfer_details.clone(),
             token_mint: data.token_mint.clone(),
             compliance_status: ComplianceStatus::Pending,
             blockchain_status: BlockchainStatus::Pending,
@@ -226,7 +262,8 @@ impl DatabaseClient for PostgresClient {
                     SELECT id, from_address, to_address, amount, token_mint, compliance_status,
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
-                           created_at, updated_at
+                           created_at, updated_at,
+                           transfer_type, proof_data, encrypted_amount
                     FROM transfer_requests
                     WHERE (created_at, id) < ($1, $2)
                     ORDER BY created_at DESC, id DESC
@@ -245,7 +282,8 @@ impl DatabaseClient for PostgresClient {
                     SELECT id, from_address, to_address, amount, token_mint, compliance_status,
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
-                           created_at, updated_at
+                           created_at, updated_at,
+                           transfer_type, proof_data, encrypted_amount
                     FROM transfer_requests
                     ORDER BY created_at DESC, id DESC
                     LIMIT $1
@@ -362,7 +400,8 @@ impl DatabaseClient for PostgresClient {
             )
             RETURNING id, from_address, to_address, amount, token_mint, compliance_status,
                       blockchain_status, blockchain_signature, blockchain_retry_count,
-                      blockchain_last_error, blockchain_next_retry_at, created_at, updated_at
+                      blockchain_last_error, blockchain_next_retry_at, created_at, updated_at,
+                      transfer_type, proof_data, encrypted_amount
             "#,
         )
         .bind(now)
@@ -403,7 +442,8 @@ impl DatabaseClient for PostgresClient {
             SELECT id, from_address, to_address, amount, token_mint, compliance_status,
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
-                   created_at, updated_at 
+                   created_at, updated_at,
+                   transfer_type, proof_data, encrypted_amount 
             FROM transfer_requests 
             WHERE blockchain_signature = $1
             "#,

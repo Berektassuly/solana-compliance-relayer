@@ -121,7 +121,7 @@ impl DatabaseClient for MockDatabaseClient {
             id: id.clone(),
             from_address: data.from_address.clone(),
             to_address: data.to_address.clone(),
-            amount: data.amount,
+            transfer_details: data.transfer_details.clone(),
             token_mint: data.token_mint.clone(),
             compliance_status,
             blockchain_status: BlockchainStatus::Pending,
@@ -392,6 +392,25 @@ impl BlockchainClient for MockBlockchainClient {
         transactions.push(format!(
             "token_transfer:{}:{}:{}",
             to_address, token_mint, amount
+        ));
+        Ok(signature)
+    }
+
+    async fn transfer_confidential(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        proof_data: &str,
+        encrypted_amount: &str,
+    ) -> Result<String, AppError> {
+        self.check_should_fail()?;
+        let mint_prefix = &token_mint[..8.min(token_mint.len())];
+        let proof_prefix = &proof_data[..8.min(proof_data.len())];
+        let signature = format!("confidential_sig_{}_{}", mint_prefix, proof_prefix);
+        let mut transactions = self.transactions.lock().unwrap();
+        transactions.push(format!(
+            "confidential_transfer:{}:{}:{}:{}",
+            to_address, token_mint, proof_data.len(), encrypted_amount.len()
         ));
         Ok(signature)
     }

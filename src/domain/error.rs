@@ -28,6 +28,8 @@ pub enum BlockchainError {
     TransactionFailed(String),
     #[error("Invalid signature: {0}")]
     InvalidSignature(String),
+    #[error("Wallet error: {0}")]
+    WalletError(String),
     #[error("Insufficient funds for transaction")]
     InsufficientFunds,
     #[error("Timeout waiting for confirmation: {0}")]
@@ -58,6 +60,8 @@ pub enum ValidationError {
     MissingField(String),
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
     #[error("Validation failed: {0}")]
     Multiple(String),
 }

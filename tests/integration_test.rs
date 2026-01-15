@@ -13,7 +13,7 @@ use solana_compliance_relayer::api::create_router;
 use solana_compliance_relayer::app::AppState;
 use solana_compliance_relayer::domain::{
     BlockchainStatus, HealthResponse, HealthStatus, PaginatedResponse, SubmitTransferRequest,
-    TransferRequest,
+    TransferRequest, TransferType,
 };
 use solana_compliance_relayer::test_utils::{
     MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
@@ -34,7 +34,9 @@ async fn test_submit_transfer_success() {
     let payload = SubmitTransferRequest {
         from_address: "FromAddr".to_string(),
         to_address: "ToAddr".to_string(),
-        amount: 1_000_000_000, // 1 SOL in lamports
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -63,7 +65,9 @@ async fn test_submit_transfer_validation_error() {
     let payload = SubmitTransferRequest {
         from_address: "".to_string(),
         to_address: "ToAddr".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -115,7 +119,9 @@ async fn test_list_requests_with_pagination() {
         let payload = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
-            amount: (i as u64) * 1_000_000_000, // i SOL in lamports
+            transfer_details: TransferType::Public {
+                amount: (i as u64) * 1_000_000_000,
+            },
             token_mint: None,
         };
         state.service.submit_transfer(&payload).await.unwrap();
@@ -172,7 +178,9 @@ async fn test_get_request_success() {
     let payload = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 10_000_000_000, // 10 SOL in lamports
+        transfer_details: TransferType::Public {
+            amount: 10_000_000_000,
+        },
         token_mint: None,
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();
@@ -219,7 +227,9 @@ async fn test_graceful_degradation_blockchain_failure() {
     let payload = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -320,7 +330,9 @@ async fn test_database_failure() {
     let payload = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -401,7 +413,9 @@ async fn test_retry_handler_not_eligible() {
     let payload = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();

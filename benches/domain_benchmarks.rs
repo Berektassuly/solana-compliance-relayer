@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use solana_compliance_relayer::domain::SubmitTransferRequest;
+use solana_compliance_relayer::domain::{SubmitTransferRequest, TransferType};
 use std::hint::black_box;
 use validator::Validate;
 
@@ -7,7 +7,9 @@ fn bench_validation(c: &mut Criterion) {
     let request = SubmitTransferRequest {
         from_address: "AddressA".to_string(),
         to_address: "AddressB".to_string(),
-        amount: 10_500_000_000, // 10.5 SOL in lamports
+        transfer_details: TransferType::Public {
+            amount: 10_500_000_000,
+        },
         token_mint: None,
     };
 

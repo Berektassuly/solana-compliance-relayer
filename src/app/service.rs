@@ -208,23 +208,8 @@ impl AppService {
             return Ok(());
         }
 
-        // Choose transfer type based on token_mint presence
-        let result = match &request.token_mint {
-            Some(mint) => {
-                // SPL Token transfer - amount is already in raw token units
-                info!(id = %request.id, mint = %mint, amount = %request.amount, "Processing SPL Token transfer");
-                self.blockchain_client
-                    .transfer_token(&request.to_address, mint, request.amount)
-                    .await
-            }
-            None => {
-                // Native SOL transfer - amount is already in lamports
-                info!(id = %request.id, amount_lamports = %request.amount, "Processing native SOL transfer");
-                self.blockchain_client
-                    .transfer_sol(&request.to_address, request.amount)
-                    .await
-            }
-        };
+        // Delegate dispatch to blockchain client
+        let result = self.blockchain_client.submit_transaction(request).await;
 
         match result {
             Ok(signature) => {

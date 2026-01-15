@@ -12,6 +12,7 @@ use std::time::Duration;
 use tracing::{debug, info, instrument, warn};
 
 // Solana SDK imports (v3.0)
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
@@ -26,8 +27,10 @@ use spl_associated_token_account::{
     get_associated_token_address_with_program_id,
     instruction::create_associated_token_account_idempotent,
 };
+
 use spl_token_interface::instruction as token_instruction;
 
+use crate::domain::types::TransferType;
 use crate::domain::{AppError, BlockchainClient, BlockchainError, TransferRequest};
 
 /// Configuration for the RPC client
@@ -393,31 +396,235 @@ impl BlockchainClient for RpcBlockchainClient {
             return Ok(format!("tx_{}", &signature[..16]));
         }
 
-        // Dispatch to the appropriate transfer method based on token_mint
-        match &request.token_mint {
-            Some(mint) => {
-                // SPL Token transfer - amount is in raw token units
-                info!(
-                    id = %request.id,
-                    mint = %mint,
-                    amount = %request.amount,
-                    to = %request.to_address,
-                    "Dispatching SPL Token transfer"
-                );
-                self.transfer_token(&request.to_address, mint, request.amount)
+        // Dispatch based on TransferType
+        match &request.transfer_details {
+            TransferType::Public { amount } => match &request.token_mint {
+                Some(mint) => {
+                    self.transfer_token(&request.to_address, mint, *amount)
+                        .await
+                }
+                None => self.transfer_sol(&request.to_address, *amount).await,
+            },
+            TransferType::Confidential {
+                proof_data,
+                encrypted_amount,
+            } => {
+                let mint = request.token_mint.as_ref().ok_or_else(|| {
+                    AppError::Validation(crate::domain::ValidationError::InvalidField {
+                        field: "token_mint".to_string(),
+                        message: "Token mint is required for confidential transfers".to_string(),
+                    })
+                })?;
+
+                self.transfer_confidential(&request.to_address, mint, proof_data, encrypted_amount)
                     .await
             }
-            None => {
-                // Native SOL transfer - amount is in lamports
-                info!(
-                    id = %request.id,
-                    amount_lamports = %request.amount,
-                    to = %request.to_address,
-                    "Dispatching native SOL transfer"
-                );
-                self.transfer_sol(&request.to_address, request.amount).await
-            }
         }
+    }
+
+    /// Transfer Token-2022 Confidential funds
+    ///
+    /// The server acts as a **Relayer**: it receives pre-computed ZK proofs and
+    /// encrypted amounts from the client, wraps them in a transaction, pays gas,
+    /// and broadcasts.
+    ///
+    /// # Arguments
+    /// * `to_address` - Destination wallet (Base58)
+    /// * `token_mint` - Token-2022 mint with confidential extensions (Base58)
+    /// * `proof_data_base64` - Client-generated ZK proof (Base64)
+    /// * `encrypted_amount_base64` - ElGamal ciphertext of amount (Base64)
+    #[instrument(skip(self))]
+    async fn transfer_confidential(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        proof_data_base64: &str,
+        encrypted_amount_base64: &str,
+    ) -> Result<String, AppError> {
+        info!(
+            to = %to_address,
+            token_mint = %token_mint,
+            proof_len = proof_data_base64.len(),
+            "Processing confidential transfer as relayer"
+        );
+
+        let keypair = self.keypair.as_ref().ok_or_else(|| {
+            AppError::Blockchain(BlockchainError::WalletError(
+                "No keypair available for signing".to_string(),
+            ))
+        })?;
+        let sdk_client = self.sdk_client.as_ref().ok_or_else(|| {
+            AppError::Blockchain(BlockchainError::Connection(
+                "No SDK client available".to_string(),
+            ))
+        })?;
+
+        // Parse addresses
+        let mint_pubkey: Pubkey = token_mint.parse().map_err(|_| {
+            AppError::Validation(crate::domain::ValidationError::InvalidAddress(
+                token_mint.to_string(),
+            ))
+        })?;
+        let to_pubkey: Pubkey = to_address.parse().map_err(|_| {
+            AppError::Validation(crate::domain::ValidationError::InvalidAddress(
+                to_address.to_string(),
+            ))
+        })?;
+
+        // Decode Base64 proof data
+        let proof_data = BASE64_STANDARD.decode(proof_data_base64).map_err(|e| {
+            AppError::Validation(crate::domain::ValidationError::InvalidField {
+                field: "proof_data".to_string(),
+                message: format!("Invalid base64 encoding: {}", e),
+            })
+        })?;
+
+        // Decode Base64 encrypted amount
+        let encrypted_amount = BASE64_STANDARD.decode(encrypted_amount_base64).map_err(|e| {
+            AppError::Validation(crate::domain::ValidationError::InvalidField {
+                field: "encrypted_amount".to_string(),
+                message: format!("Invalid base64 encoding: {}", e),
+            })
+        })?;
+
+        debug!(
+            proof_bytes = proof_data.len(),
+            ciphertext_bytes = encrypted_amount.len(),
+            "Decoded confidential transfer data"
+        );
+
+        // Token-2022 program ID
+        let token_program_id = spl_token_2022::id();
+
+        // Derive source and destination confidential token accounts
+        // For confidential transfers, we use the standard ATA but with Token-2022 program
+        let source_ata = get_associated_token_address_with_program_id(
+            &keypair.pubkey(),
+            &mint_pubkey,
+            &token_program_id,
+        );
+        let destination_ata = get_associated_token_address_with_program_id(
+            &to_pubkey,
+            &mint_pubkey,
+            &token_program_id,
+        );
+
+        debug!(
+            source_ata = %source_ata,
+            destination_ata = %destination_ata,
+            "Derived confidential token accounts"
+        );
+
+        // Get priority fee
+        let priority_fee = self.get_quicknode_priority_fee().await;
+
+        // Build instructions
+        let mut instructions: Vec<Instruction> = vec![
+            ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
+            // Set higher compute unit limit for ZK proof verification
+            ComputeBudgetInstruction::set_compute_unit_limit(400_000),
+        ];
+
+        // Check if destination ATA exists, create if needed
+        let dest_account_result = sdk_client.get_account(&destination_ata).await;
+        if dest_account_result.is_err() {
+            info!(destination_ata = %destination_ata, "Creating destination ATA for confidential transfer");
+            let create_ata_ix = create_associated_token_account_idempotent(
+                &keypair.pubkey(),
+                &to_pubkey,
+                &mint_pubkey,
+                &token_program_id,
+            );
+            instructions.push(create_ata_ix);
+        }
+
+        // Build the confidential transfer instruction
+        // NOTE: Token-2022 confidential transfer uses a complex instruction format.
+        // The proof_data contains the serialized ZK proofs, and encrypted_amount
+        // contains the ElGamal ciphertext.
+        //
+        // The instruction data format for ConfidentialTransfer::Transfer is:
+        // [instruction_discriminator (1 byte) | new_source_decryptable_available_balance (36 bytes) | proof_instruction_offset (i8)]
+        //
+        // The ZK proofs are typically submitted as separate instructions or via
+        // the proof_instruction_offset mechanism.
+        //
+        // For this relayer implementation, we expect the client to provide
+        // pre-serialized instruction data that we wrap and broadcast.
+
+        // Construct raw instruction with client-provided data
+        // The proof_data from client should be the complete, serialized instruction data
+        let confidential_transfer_ix = Instruction {
+            program_id: token_program_id,
+            accounts: vec![
+                // Source token account (writable)
+                solana_sdk::instruction::AccountMeta::new(source_ata, false),
+                // Mint (readonly)
+                solana_sdk::instruction::AccountMeta::new_readonly(mint_pubkey, false),
+                // Destination token account (writable)
+                solana_sdk::instruction::AccountMeta::new(destination_ata, false),
+                // Authority (signer) - the relayer signs on behalf of the source
+                solana_sdk::instruction::AccountMeta::new_readonly(keypair.pubkey(), true),
+            ],
+            // Client provides the serialized instruction data including proofs
+            data: proof_data,
+        };
+
+        instructions.push(confidential_transfer_ix);
+
+        // If encrypted_amount is not empty, it might be additional proof data
+        // that needs to be included as a separate instruction (depends on client format)
+        if !encrypted_amount.is_empty() {
+            debug!(
+                "Encrypted amount data provided ({} bytes) - may be used for proof verification",
+                encrypted_amount.len()
+            );
+            // The encrypted_amount is typically embedded in proof_data for standard transfers
+            // If the client provides it separately, it's available here for custom handling
+        }
+
+        // Get recent blockhash
+        let recent_blockhash = sdk_client
+            .get_latest_blockhash()
+            .await
+            .map_err(map_solana_client_error)?;
+
+        // Build and sign transaction
+        let transaction = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&keypair.pubkey()),
+            &[keypair],
+            recent_blockhash,
+        );
+
+        // Send and confirm transaction
+        let signature = sdk_client
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(|e| {
+                // Provide detailed error for confidential transfer failures
+                let msg = e.to_string();
+                if msg.contains("ProofVerificationFailed") || msg.contains("proof") {
+                    AppError::Blockchain(BlockchainError::TransactionFailed(
+                        format!("ZK proof verification failed. Ensure client-generated proofs are valid: {}", msg)
+                    ))
+                } else if msg.contains("ConfidentialTransferNotEnabled") {
+                    AppError::Blockchain(BlockchainError::TransactionFailed(
+                        format!("Mint does not have confidential transfer extension enabled: {}", msg)
+                    ))
+                } else {
+                    map_solana_client_error(e)
+                }
+            })?;
+
+        info!(
+            signature = %signature,
+            to = %to_address,
+            token_mint = %token_mint,
+            "Confidential transfer relayed successfully"
+        );
+
+        Ok(signature.to_string())
     }
 
     #[instrument(skip(self))]

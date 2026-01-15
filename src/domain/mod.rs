@@ -11,5 +11,5 @@ pub use traits::{BlockchainClient, ComplianceProvider, DatabaseClient};
 pub use types::{
     BlockchainStatus, ComplianceStatus, ErrorDetail, ErrorResponse, HealthResponse, HealthStatus,
     HeliusTransaction, PaginatedResponse, PaginationParams, RateLimitResponse,
-    SubmitTransferRequest, TransferRequest,
+    SubmitTransferRequest, TransferRequest, TransferType,
 };

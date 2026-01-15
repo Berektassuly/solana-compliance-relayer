@@ -244,6 +244,7 @@ impl ComplianceProvider for RangeComplianceProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::TransferType;
 
     #[test]
     fn test_mock_mode_approved() {
@@ -342,7 +343,9 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "sender".to_string(),
             to_address: "receiver".to_string(),
-            amount: 1_000_000_000,
+            transfer_details: TransferType::Public {
+                amount: 1_000_000_000,
+            },
             token_mint: None,
         };
         let result = provider.check_compliance(&request).await;
@@ -355,7 +358,9 @@ mod tests {
         let request = SubmitTransferRequest {
             from_address: "sender".to_string(),
             to_address: "hackBadWallet".to_string(),
-            amount: 1_000_000_000,
+            transfer_details: TransferType::Public {
+                amount: 1_000_000_000,
+            },
             token_mint: None,
         };
         let result = provider.check_compliance(&request).await;

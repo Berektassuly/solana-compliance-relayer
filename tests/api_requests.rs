@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use solana_compliance_relayer::api::create_router;
 use solana_compliance_relayer::app::AppState;
 use solana_compliance_relayer::domain::{
-    PaginatedResponse, SubmitTransferRequest, TransferRequest,
+    PaginatedResponse, SubmitTransferRequest, TransferRequest, TransferType,
 };
 use solana_compliance_relayer::test_utils::{
     MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
@@ -33,7 +33,9 @@ async fn test_full_transfer_lifecycle_flow() {
     let create_payload = SubmitTransferRequest {
         from_address: "SenderAddress".to_string(),
         to_address: "ReceiverAddress".to_string(),
-        amount: 50_000_000_000, // 50 SOL in lamports
+        transfer_details: TransferType::Public {
+            amount: 50_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -56,7 +58,12 @@ async fn test_full_transfer_lifecycle_flow() {
     let created_request: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
     let request_id = created_request.id;
     assert_eq!(created_request.from_address, "SenderAddress");
-    assert_eq!(created_request.amount, 50_000_000_000);
+    assert_eq!(
+        created_request.transfer_details,
+        TransferType::Public {
+            amount: 50_000_000_000
+        }
+    );
 
     // 2. GET - Retrieve the created request by ID
     let get_request = Request::builder()
@@ -103,7 +110,9 @@ async fn test_post_bad_request_validation() {
     let bad_payload = SubmitTransferRequest {
         from_address: "".to_string(), // Invalid
         to_address: "ValidAddress".to_string(),
-        amount: 10_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 10_000_000_000,
+        },
         token_mint: None,
     };
 

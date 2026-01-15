@@ -146,6 +146,21 @@ pub trait BlockchainClient: Send + Sync {
             "transfer_token not implemented".to_string(),
         ))
     }
+
+    /// Transfer Token-2022 Confidential tokens
+    /// Requires Zero-Knowledge Proof and ElGamal ciphertext
+    async fn transfer_confidential(
+        &self,
+        to_address: &str,
+        token_mint: &str,
+        proof_data: &str,
+        encrypted_amount: &str,
+    ) -> Result<String, AppError> {
+        let _ = (to_address, token_mint, proof_data, encrypted_amount);
+        Err(AppError::NotSupported(
+            "transfer_confidential not implemented".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

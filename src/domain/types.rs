@@ -101,6 +101,27 @@ impl std::fmt::Display for ComplianceStatus {
     }
 }
 
+/// Type of transfer and associated data
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TransferType {
+    /// Standard public transfer with visible amount
+    Public {
+        /// Amount in atomic units
+        #[schema(example = 1_000_000_000)]
+        amount: u64,
+    },
+    /// Confidential transfer with zero-knowledge proof
+    Confidential {
+        /// Base64 encoded Zero-Knowledge Proof
+        #[schema(example = "base64_proof_data...")]
+        proof_data: String,
+        /// Base64 encoded ElGamal ciphertext of the amount
+        #[schema(example = "base64_encrypted_amount...")]
+        encrypted_amount: String,
+    },
+}
+
 /// Core transfer request entity
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct TransferRequest {
@@ -113,14 +134,15 @@ pub struct TransferRequest {
     /// Recipient wallet address (Base58 Solana address)
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount in atomic units (lamports for SOL, raw units for SPL tokens)
-    /// Example: 1_000_000_000 = 1 SOL, 1_000_000 = 1 USDC (6 decimals)
-    #[schema(example = 1_000_000_000)]
-    pub amount: u64,
+
+    /// Transfer details (Public vs Confidential)
+    pub transfer_details: TransferType,
+
     /// Optional SPL Token mint address. None means native SOL transfer.
     #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub token_mint: Option<String>,
+
     /// Compliance check status
     pub compliance_status: ComplianceStatus,
     /// Blockchain submission status
@@ -148,7 +170,7 @@ impl TransferRequest {
             id,
             from_address,
             to_address,
-            amount,
+            transfer_details: TransferType::Public { amount },
             token_mint: None,
             compliance_status: ComplianceStatus::Pending,
             blockchain_status: BlockchainStatus::Pending,
@@ -194,26 +216,80 @@ impl Default for TransferRequest {
 }
 
 /// Request to submit a new transfer
-#[derive(Debug, Clone, Serialize, Deserialize, Validate, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SubmitTransferRequest {
     /// Sender wallet address (Base58 Solana address)
-    #[validate(length(min = 1, message = "From address is required"))]
     #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
     pub from_address: String,
     /// Recipient wallet address (Base58 Solana address)
-    #[validate(length(min = 1, message = "To address is required"))]
     #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
     pub to_address: String,
-    /// Amount in atomic units (lamports for SOL, raw units for SPL tokens)
-    /// Example: 1_000_000_000 = 1 SOL, 1_000_000 = 1 USDC (6 decimals)
-    #[validate(range(min = 1, message = "Amount must be at least 1 atomic unit"))]
-    #[schema(example = 1_000_000_000)]
-    pub amount: u64,
+
+    /// Transfer details (Public or Confidential)
+    pub transfer_details: TransferType,
+
     /// Optional SPL Token mint address. If None, this is a native SOL transfer.
     /// If Some, this is an SPL Token transfer for the specified mint.
     #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub token_mint: Option<String>,
+}
+
+impl Validate for SubmitTransferRequest {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        let mut errors = validator::ValidationErrors::new();
+
+        if self.from_address.is_empty() {
+            errors.add(
+                "from_address",
+                validator::ValidationError::new("From address is required"),
+            );
+        }
+        if self.to_address.is_empty() {
+            errors.add(
+                "to_address",
+                validator::ValidationError::new("To address is required"),
+            );
+        }
+
+        match &self.transfer_details {
+            TransferType::Public { amount } => {
+                if *amount == 0 {
+                    errors.add(
+                        "amount",
+                        validator::ValidationError::new("Amount must be greater than 0"),
+                    );
+                }
+            }
+            TransferType::Confidential {
+                proof_data,
+                encrypted_amount,
+            } => {
+                if proof_data.is_empty() {
+                    errors.add(
+                        "proof_data",
+                        validator::ValidationError::new(
+                            "Proof data is required for confidential transfers",
+                        ),
+                    );
+                }
+                if encrypted_amount.is_empty() {
+                    errors.add(
+                        "encrypted_amount",
+                        validator::ValidationError::new(
+                            "Encrypted amount is required for confidential transfers",
+                        ),
+                    );
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 impl SubmitTransferRequest {
@@ -222,7 +298,7 @@ impl SubmitTransferRequest {
         Self {
             from_address,
             to_address,
-            amount,
+            transfer_details: TransferType::Public { amount },
             token_mint: None,
         }
     }
@@ -238,7 +314,27 @@ impl SubmitTransferRequest {
         Self {
             from_address,
             to_address,
-            amount,
+            transfer_details: TransferType::Public { amount },
+            token_mint: Some(token_mint),
+        }
+    }
+
+    /// Create a new Confidential transfer request
+    #[must_use]
+    pub fn new_confidential(
+        from_address: String,
+        to_address: String,
+        proof_data: String,
+        encrypted_amount: String,
+        token_mint: String,
+    ) -> Self {
+        Self {
+            from_address,
+            to_address,
+            transfer_details: TransferType::Confidential {
+                proof_data,
+                encrypted_amount,
+            },
             token_mint: Some(token_mint),
         }
     }
@@ -456,6 +552,26 @@ mod tests {
         // Invalid Amount (zero)
         let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0);
         assert!(req.validate().is_err());
+
+        // Valid Confidential Request
+        let req = SubmitTransferRequest::new_confidential(
+            "From".to_string(),
+            "To".to_string(),
+            "proof".to_string(),
+            "cipher".to_string(),
+            "mint".to_string(),
+        );
+        assert!(req.validate().is_ok());
+
+        // Invalid Confidential (empty proof)
+        let req = SubmitTransferRequest::new_confidential(
+            "From".to_string(),
+            "To".to_string(),
+            "".to_string(),
+            "cipher".to_string(),
+            "mint".to_string(),
+        );
+        assert!(req.validate().is_err());
     }
 
     #[test]
@@ -473,6 +589,12 @@ mod tests {
         assert_eq!(req.blockchain_retry_count, 0);
         assert!(req.blockchain_last_error.is_none());
         assert!(req.blockchain_next_retry_at.is_none());
+        assert_eq!(
+            req.transfer_details,
+            TransferType::Public {
+                amount: 10_500_000_000
+            }
+        );
     }
 
     #[test]
@@ -490,6 +612,11 @@ mod tests {
         assert_eq!(deserialized.id, "tr_123");
         assert_eq!(deserialized.from_address, "from_abc");
         assert_eq!(deserialized.to_address, "to_xyz");
-        assert_eq!(deserialized.amount, 5_000_000_000);
+        assert_eq!(
+            deserialized.transfer_details,
+            TransferType::Public {
+                amount: 5_000_000_000
+            }
+        );
     }
 }

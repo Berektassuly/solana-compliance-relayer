@@ -5,7 +5,9 @@
 
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
-use solana_compliance_relayer::domain::{BlockchainStatus, DatabaseClient, SubmitTransferRequest};
+use solana_compliance_relayer::domain::{
+    BlockchainStatus, DatabaseClient, SubmitTransferRequest, TransferType,
+};
 use solana_compliance_relayer::infra::{PostgresClient, PostgresConfig};
 
 /// Helper to create a PostgreSQL container and client
@@ -54,7 +56,9 @@ async fn test_create_and_get_transfer_request() {
     let request = SubmitTransferRequest {
         from_address: "From1".to_string(),
         to_address: "To1".to_string(),
-        amount: 100_000_000_000, // 100 SOL in lamports
+        transfer_details: TransferType::Public {
+            amount: 100_000_000_000,
+        },
         token_mint: None,
     };
 
@@ -65,7 +69,12 @@ async fn test_create_and_get_transfer_request() {
         .expect("Failed to submit transfer");
     assert_eq!(created.from_address, "From1");
     assert_eq!(created.to_address, "To1");
-    assert_eq!(created.amount, 100_000_000_000);
+    assert_eq!(
+        created.transfer_details,
+        TransferType::Public {
+            amount: 100_000_000_000
+        }
+    );
     assert!(!created.id.is_empty());
 
     // Get item
@@ -88,7 +97,9 @@ async fn test_list_requests_pagination() {
         let request = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
-            amount: (i as u64) * 1_000_000_000, // i SOL in lamports
+            transfer_details: TransferType::Public {
+                amount: (i as u64) * 1_000_000_000,
+            },
             token_mint: None,
         };
         client
@@ -133,7 +144,9 @@ async fn test_blockchain_status_updates() {
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
     let created = client
@@ -201,7 +214,9 @@ async fn test_get_pending_blockchain_requests() {
         let request = SubmitTransferRequest {
             from_address: format!("From{}", i),
             to_address: format!("To{}", i),
-            amount: 1_000_000_000,
+            transfer_details: TransferType::Public {
+                amount: 1_000_000_000,
+            },
             token_mint: None,
         };
         let item = client
@@ -265,7 +280,9 @@ async fn test_increment_retry_count() {
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
         to_address: "To".to_string(),
-        amount: 1_000_000_000,
+        transfer_details: TransferType::Public {
+            amount: 1_000_000_000,
+        },
         token_mint: None,
     };
     let created = client
