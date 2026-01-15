@@ -148,15 +148,25 @@ pub trait BlockchainClient: Send + Sync {
     }
 
     /// Transfer Token-2022 Confidential tokens
-    /// Requires Zero-Knowledge Proof and ElGamal ciphertext
+    /// The server constructs the instruction from structured proof components,
+    /// ensuring full control over what it signs (mitigates Confused Deputy).
     async fn transfer_confidential(
         &self,
         to_address: &str,
         token_mint: &str,
-        proof_data: &str,
-        encrypted_amount: &str,
+        new_decryptable_available_balance: &str,
+        equality_proof: &str,
+        ciphertext_validity_proof: &str,
+        range_proof: &str,
     ) -> Result<String, AppError> {
-        let _ = (to_address, token_mint, proof_data, encrypted_amount);
+        let _ = (
+            to_address,
+            token_mint,
+            new_decryptable_available_balance,
+            equality_proof,
+            ciphertext_validity_proof,
+            range_proof,
+        );
         Err(AppError::NotSupported(
             "transfer_confidential not implemented".to_string(),
         ))

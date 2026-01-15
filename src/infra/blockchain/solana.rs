@@ -406,8 +406,10 @@ impl BlockchainClient for RpcBlockchainClient {
                 None => self.transfer_sol(&request.to_address, *amount).await,
             },
             TransferType::Confidential {
-                proof_data,
-                encrypted_amount,
+                new_decryptable_available_balance,
+                equality_proof,
+                ciphertext_validity_proof,
+                range_proof,
             } => {
                 let mint = request.token_mint.as_ref().ok_or_else(|| {
                     AppError::Validation(crate::domain::ValidationError::InvalidField {
@@ -416,36 +418,45 @@ impl BlockchainClient for RpcBlockchainClient {
                     })
                 })?;
 
-                self.transfer_confidential(&request.to_address, mint, proof_data, encrypted_amount)
-                    .await
+                self.transfer_confidential(
+                    &request.to_address,
+                    mint,
+                    new_decryptable_available_balance,
+                    equality_proof,
+                    ciphertext_validity_proof,
+                    range_proof,
+                )
+                .await
             }
         }
     }
 
-    /// Transfer Token-2022 Confidential funds
+    /// Transfer Token-2022 Confidential funds (Smart Relayer pattern)
     ///
-    /// The server acts as a **Relayer**: it receives pre-computed ZK proofs and
-    /// encrypted amounts from the client, wraps them in a transaction, pays gas,
-    /// and broadcasts.
+    /// The server constructs the instruction from structured proof components,
+    /// ensuring full control over what it signs (mitigates Confused Deputy).
     ///
     /// # Arguments
     /// * `to_address` - Destination wallet (Base58)
     /// * `token_mint` - Token-2022 mint with confidential extensions (Base58)
-    /// * `proof_data_base64` - Client-generated ZK proof (Base64)
-    /// * `encrypted_amount_base64` - ElGamal ciphertext of amount (Base64)
+    /// * `new_decryptable_available_balance_base64` - AES-encrypted balance (Base64)
+    /// * `equality_proof_base64` - CiphertextCommitmentEqualityProofData (Base64)
+    /// * `ciphertext_validity_proof_base64` - BatchedGroupedCiphertext3HandlesValidityProofData (Base64)
+    /// * `range_proof_base64` - BatchedRangeProofU128Data (Base64)
     #[instrument(skip(self))]
     async fn transfer_confidential(
         &self,
         to_address: &str,
         token_mint: &str,
-        proof_data_base64: &str,
-        encrypted_amount_base64: &str,
+        new_decryptable_available_balance_base64: &str,
+        equality_proof_base64: &str,
+        ciphertext_validity_proof_base64: &str,
+        range_proof_base64: &str,
     ) -> Result<String, AppError> {
         info!(
             to = %to_address,
             token_mint = %token_mint,
-            proof_len = proof_data_base64.len(),
-            "Processing confidential transfer as relayer"
+            "Processing confidential transfer as Smart Relayer"
         );
 
         let keypair = self.keypair.as_ref().ok_or_else(|| {
@@ -471,28 +482,45 @@ impl BlockchainClient for RpcBlockchainClient {
             ))
         })?;
 
-        // Decode Base64 proof data
-        let proof_data = BASE64_STANDARD.decode(proof_data_base64).map_err(|e| {
-            AppError::Validation(crate::domain::ValidationError::InvalidField {
-                field: "proof_data".to_string(),
-                message: format!("Invalid base64 encoding: {}", e),
-            })
-        })?;
-
-        // Decode Base64 encrypted amount
-        let encrypted_amount = BASE64_STANDARD
-            .decode(encrypted_amount_base64)
+        // Decode each proof component from Base64
+        let new_decryptable_balance = BASE64_STANDARD
+            .decode(new_decryptable_available_balance_base64)
             .map_err(|e| {
                 AppError::Validation(crate::domain::ValidationError::InvalidField {
-                    field: "encrypted_amount".to_string(),
+                    field: "new_decryptable_available_balance".to_string(),
                     message: format!("Invalid base64 encoding: {}", e),
                 })
             })?;
 
+        let equality_proof = BASE64_STANDARD.decode(equality_proof_base64).map_err(|e| {
+            AppError::Validation(crate::domain::ValidationError::InvalidField {
+                field: "equality_proof".to_string(),
+                message: format!("Invalid base64 encoding: {}", e),
+            })
+        })?;
+
+        let ciphertext_validity_proof = BASE64_STANDARD
+            .decode(ciphertext_validity_proof_base64)
+            .map_err(|e| {
+                AppError::Validation(crate::domain::ValidationError::InvalidField {
+                    field: "ciphertext_validity_proof".to_string(),
+                    message: format!("Invalid base64 encoding: {}", e),
+                })
+            })?;
+
+        let range_proof = BASE64_STANDARD.decode(range_proof_base64).map_err(|e| {
+            AppError::Validation(crate::domain::ValidationError::InvalidField {
+                field: "range_proof".to_string(),
+                message: format!("Invalid base64 encoding: {}", e),
+            })
+        })?;
+
         debug!(
-            proof_bytes = proof_data.len(),
-            ciphertext_bytes = encrypted_amount.len(),
-            "Decoded confidential transfer data"
+            balance_bytes = new_decryptable_balance.len(),
+            equality_proof_bytes = equality_proof.len(),
+            validity_proof_bytes = ciphertext_validity_proof.len(),
+            range_proof_bytes = range_proof.len(),
+            "Decoded confidential transfer proof components"
         );
 
         // Token-2022 program ID
@@ -540,22 +568,26 @@ impl BlockchainClient for RpcBlockchainClient {
             instructions.push(create_ata_ix);
         }
 
-        // Build the confidential transfer instruction
-        // NOTE: Token-2022 confidential transfer uses a complex instruction format.
-        // The proof_data contains the serialized ZK proofs, and encrypted_amount
-        // contains the ElGamal ciphertext.
+        // Build the confidential transfer instruction (Smart Relayer pattern)
+        // The server constructs the instruction from structured proof components,
+        // ensuring full control over what is signed.
         //
-        // The instruction data format for ConfidentialTransfer::Transfer is:
-        // [instruction_discriminator (1 byte) | new_source_decryptable_available_balance (36 bytes) | proof_instruction_offset (i8)]
+        // Instruction data format for ConfidentialTransfer::Transfer:
+        // [discriminator (1 byte) | new_source_decryptable_available_balance | proof_instruction_offset (i8)]
         //
-        // The ZK proofs are typically submitted as separate instructions or via
-        // the proof_instruction_offset mechanism.
-        //
-        // For this relayer implementation, we expect the client to provide
-        // pre-serialized instruction data that we wrap and broadcast.
+        // The ZK proofs are submitted as separate verify instructions.
 
-        // Construct raw instruction with client-provided data
-        // The proof_data from client should be the complete, serialized instruction data
+        // Build instruction data: discriminator + new_decryptable_balance + proof_offset
+        // Discriminator for Transfer is 26 (0x1a)
+        let mut instruction_data = vec![26u8]; // Transfer discriminator
+        instruction_data.extend_from_slice(&new_decryptable_balance);
+        instruction_data.push(0i8 as u8); // proof_instruction_offset = 0 (inline)
+
+        // Append proof data in expected order for inline verification
+        instruction_data.extend_from_slice(&equality_proof);
+        instruction_data.extend_from_slice(&ciphertext_validity_proof);
+        instruction_data.extend_from_slice(&range_proof);
+
         let confidential_transfer_ix = Instruction {
             program_id: token_program_id,
             accounts: vec![
@@ -568,22 +600,11 @@ impl BlockchainClient for RpcBlockchainClient {
                 // Authority (signer) - the relayer signs on behalf of the source
                 solana_sdk::instruction::AccountMeta::new_readonly(keypair.pubkey(), true),
             ],
-            // Client provides the serialized instruction data including proofs
-            data: proof_data,
+            // Server-constructed instruction data from structured components
+            data: instruction_data,
         };
 
         instructions.push(confidential_transfer_ix);
-
-        // If encrypted_amount is not empty, it might be additional proof data
-        // that needs to be included as a separate instruction (depends on client format)
-        if !encrypted_amount.is_empty() {
-            debug!(
-                "Encrypted amount data provided ({} bytes) - may be used for proof verification",
-                encrypted_amount.len()
-            );
-            // The encrypted_amount is typically embedded in proof_data for standard transfers
-            // If the client provides it separately, it's available here for custom handling
-        }
 
         // Get recent blockhash
         let recent_blockhash = sdk_client

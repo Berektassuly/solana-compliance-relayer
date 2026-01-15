@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use secrecy::SecretString;
 use tokio::signal;
 use tracing::{info, warn};
@@ -88,19 +87,32 @@ impl Config {
     }
 
     fn load_signing_key() -> Result<SigningKey> {
-        match env::var("ISSUER_PRIVATE_KEY").ok() {
-            Some(key_str)
-                if !key_str.is_empty() && key_str != "YOUR_BASE58_ENCODED_PRIVATE_KEY_HERE" =>
-            {
-                info!("Loading signing key from environment");
-                let secret = SecretString::from(key_str);
-                signing_key_from_base58(&secret).context("Failed to parse ISSUER_PRIVATE_KEY")
-            }
-            _ => {
-                warn!("No valid ISSUER_PRIVATE_KEY, generating ephemeral keypair");
-                Ok(SigningKey::generate(&mut OsRng))
-            }
+        let key_str = env::var("ISSUER_PRIVATE_KEY").map_err(|_| {
+            anyhow::anyhow!(
+                "ISSUER_PRIVATE_KEY environment variable is not set.\n\
+                 This is a REQUIRED configuration for production.\n\
+                 Please set ISSUER_PRIVATE_KEY to a valid Base58-encoded Solana private key."
+            )
+        })?;
+
+        if key_str.is_empty() {
+            anyhow::bail!(
+                "ISSUER_PRIVATE_KEY environment variable is empty.\n\
+                 Please provide a valid Base58-encoded Solana private key."
+            );
         }
+
+        if key_str == "YOUR_BASE58_ENCODED_PRIVATE_KEY_HERE" {
+            anyhow::bail!(
+                "ISSUER_PRIVATE_KEY is set to the default placeholder value.\n\
+                 Please replace it with your actual Base58-encoded Solana private key.\n\
+                 SECURITY WARNING: Never run in production without a valid key!"
+            );
+        }
+
+        info!("Loading signing key from environment");
+        let secret = SecretString::from(key_str);
+        signing_key_from_base58(&secret).context("Failed to parse ISSUER_PRIVATE_KEY as Base58")
     }
 }
 

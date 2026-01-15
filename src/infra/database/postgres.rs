@@ -86,13 +86,20 @@ impl PostgresClient {
         // New fields for confidential transfers
         let transfer_type_str: Option<String> = row.try_get("transfer_type").ok();
         let amount_opt: Option<i64> = row.get("amount");
-        let proof_data: Option<String> = row.try_get("proof_data").ok();
-        let encrypted_amount: Option<String> = row.try_get("encrypted_amount").ok();
+        let new_decryptable_available_balance: Option<String> =
+            row.try_get("new_decryptable_available_balance").ok();
+        let equality_proof: Option<String> = row.try_get("equality_proof").ok();
+        let ciphertext_validity_proof: Option<String> =
+            row.try_get("ciphertext_validity_proof").ok();
+        let range_proof: Option<String> = row.try_get("range_proof").ok();
 
         let transfer_details = match transfer_type_str.as_deref() {
             Some("confidential") => TransferType::Confidential {
-                proof_data: proof_data.unwrap_or_default(),
-                encrypted_amount: encrypted_amount.unwrap_or_default(),
+                new_decryptable_available_balance: new_decryptable_available_balance
+                    .unwrap_or_default(),
+                equality_proof: equality_proof.unwrap_or_default(),
+                ciphertext_validity_proof: ciphertext_validity_proof.unwrap_or_default(),
+                range_proof: range_proof.unwrap_or_default(),
             },
             // Default to Public if "public" or unknown/null (backward compatibility)
             _ => TransferType::Public {
@@ -141,7 +148,7 @@ impl DatabaseClient for PostgresClient {
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
-                   transfer_type, proof_data, encrypted_amount
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
             FROM transfer_requests 
             WHERE id = $1
             "#,
@@ -165,17 +172,29 @@ impl DatabaseClient for PostgresClient {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let (transfer_type_str, amount, proof_data, encrypted_amount) = match &data.transfer_details
-        {
-            TransferType::Public { amount } => ("public", Some(*amount as i64), None, None),
+        let (
+            transfer_type_str,
+            amount,
+            new_decryptable_available_balance,
+            equality_proof,
+            ciphertext_validity_proof,
+            range_proof,
+        ) = match &data.transfer_details {
+            TransferType::Public { amount } => {
+                ("public", Some(*amount as i64), None, None, None, None)
+            }
             TransferType::Confidential {
-                proof_data,
-                encrypted_amount,
+                new_decryptable_available_balance,
+                equality_proof,
+                ciphertext_validity_proof,
+                range_proof,
             } => (
                 "confidential",
                 None,
-                Some(proof_data.clone()),
-                Some(encrypted_amount.clone()),
+                Some(new_decryptable_available_balance.clone()),
+                Some(equality_proof.clone()),
+                Some(ciphertext_validity_proof.clone()),
+                Some(range_proof.clone()),
             ),
         };
 
@@ -185,9 +204,9 @@ impl DatabaseClient for PostgresClient {
                 id, from_address, to_address, amount, token_mint,
                 compliance_status, blockchain_status, blockchain_retry_count,
                 created_at, updated_at,
-                transfer_type, proof_data, encrypted_amount
+                transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
         )
         .bind(&id)
@@ -201,8 +220,10 @@ impl DatabaseClient for PostgresClient {
         .bind(now)
         .bind(now)
         .bind(transfer_type_str)
-        .bind(proof_data)
-        .bind(encrypted_amount)
+        .bind(new_decryptable_available_balance)
+        .bind(equality_proof)
+        .bind(ciphertext_validity_proof)
+        .bind(range_proof)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Database(DatabaseError::from(e)))?;
@@ -263,7 +284,7 @@ impl DatabaseClient for PostgresClient {
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
-                           transfer_type, proof_data, encrypted_amount
+                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
                     FROM transfer_requests
                     WHERE (created_at, id) < ($1, $2)
                     ORDER BY created_at DESC, id DESC
@@ -283,7 +304,7 @@ impl DatabaseClient for PostgresClient {
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
-                           transfer_type, proof_data, encrypted_amount
+                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
                     FROM transfer_requests
                     ORDER BY created_at DESC, id DESC
                     LIMIT $1
@@ -401,7 +422,7 @@ impl DatabaseClient for PostgresClient {
             RETURNING id, from_address, to_address, amount, token_mint, compliance_status,
                       blockchain_status, blockchain_signature, blockchain_retry_count,
                       blockchain_last_error, blockchain_next_retry_at, created_at, updated_at,
-                      transfer_type, proof_data, encrypted_amount
+                      transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
             "#,
         )
         .bind(now)
@@ -443,7 +464,7 @@ impl DatabaseClient for PostgresClient {
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
-                   transfer_type, proof_data, encrypted_amount 
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof 
             FROM transfer_requests 
             WHERE blockchain_signature = $1
             "#,

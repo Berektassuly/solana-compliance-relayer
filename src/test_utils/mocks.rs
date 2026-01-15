@@ -400,20 +400,23 @@ impl BlockchainClient for MockBlockchainClient {
         &self,
         to_address: &str,
         token_mint: &str,
-        proof_data: &str,
-        encrypted_amount: &str,
+        new_decryptable_available_balance: &str,
+        equality_proof: &str,
+        ciphertext_validity_proof: &str,
+        range_proof: &str,
     ) -> Result<String, AppError> {
         self.check_should_fail()?;
         let mint_prefix = &token_mint[..8.min(token_mint.len())];
-        let proof_prefix = &proof_data[..8.min(proof_data.len())];
-        let signature = format!("confidential_sig_{}_{}", mint_prefix, proof_prefix);
+        let signature = format!("confidential_sig_{}", mint_prefix);
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
-            "confidential_transfer:{}:{}:{}:{}",
+            "confidential_transfer:{}:{}:balance={}:eq={}:val={}:range={}",
             to_address,
             token_mint,
-            proof_data.len(),
-            encrypted_amount.len()
+            new_decryptable_available_balance.len(),
+            equality_proof.len(),
+            ciphertext_validity_proof.len(),
+            range_proof.len()
         ));
         Ok(signature)
     }

@@ -111,14 +111,34 @@ pub enum TransferType {
         #[schema(example = 1_000_000_000)]
         amount: u64,
     },
-    /// Confidential transfer with zero-knowledge proof
+    /// Confidential transfer with zero-knowledge proofs (Token-2022)
+    ///
+    /// The client must generate all ZK proofs locally and submit the individual
+    /// proof components. The server constructs the instruction from these
+    /// components, ensuring it maintains full control over what it signs.
     Confidential {
-        /// Base64 encoded Zero-Knowledge Proof
-        #[schema(example = "base64_proof_data...")]
-        proof_data: String,
-        /// Base64 encoded ElGamal ciphertext of the amount
-        #[schema(example = "base64_encrypted_amount...")]
-        encrypted_amount: String,
+        /// New source decryptable available balance after transfer (Base64 AES ciphertext)
+        /// This is the encrypted balance that only the source account holder can decrypt
+        #[schema(example = "SGVsbG8gV29ybGQ=")]
+        new_decryptable_available_balance: String,
+
+        /// Equality proof (Base64 serialized CiphertextCommitmentEqualityProofData)
+        /// Proves that the new balance ciphertext correctly results from subtracting
+        /// the transfer amount from the current balance
+        #[schema(example = "SGVsbG8gRXF1YWxpdHkgUHJvb2Y=")]
+        equality_proof: String,
+
+        /// Ciphertext validity proof (Base64 serialized BatchedGroupedCiphertext3HandlesValidityProofData)
+        /// Proves that the transfer amount ciphertexts are correctly constructed for
+        /// source, destination, and optional auditor
+        #[schema(example = "SGVsbG8gVmFsaWRpdHkgUHJvb2Y=")]
+        ciphertext_validity_proof: String,
+
+        /// Range proof (Base64 serialized BatchedRangeProofU128Data)
+        /// Proves that the new balance and transfer amount are non-negative
+        /// and within valid range
+        #[schema(example = "SGVsbG8gUmFuZ2UgUHJvb2Y=")]
+        range_proof: String,
     },
 }
 
@@ -262,22 +282,40 @@ impl Validate for SubmitTransferRequest {
                 }
             }
             TransferType::Confidential {
-                proof_data,
-                encrypted_amount,
+                new_decryptable_available_balance,
+                equality_proof,
+                ciphertext_validity_proof,
+                range_proof,
             } => {
-                if proof_data.is_empty() {
+                if new_decryptable_available_balance.is_empty() {
                     errors.add(
-                        "proof_data",
+                        "new_decryptable_available_balance",
                         validator::ValidationError::new(
-                            "Proof data is required for confidential transfers",
+                            "New decryptable available balance is required for confidential transfers",
                         ),
                     );
                 }
-                if encrypted_amount.is_empty() {
+                if equality_proof.is_empty() {
                     errors.add(
-                        "encrypted_amount",
+                        "equality_proof",
                         validator::ValidationError::new(
-                            "Encrypted amount is required for confidential transfers",
+                            "Equality proof is required for confidential transfers",
+                        ),
+                    );
+                }
+                if ciphertext_validity_proof.is_empty() {
+                    errors.add(
+                        "ciphertext_validity_proof",
+                        validator::ValidationError::new(
+                            "Ciphertext validity proof is required for confidential transfers",
+                        ),
+                    );
+                }
+                if range_proof.is_empty() {
+                    errors.add(
+                        "range_proof",
+                        validator::ValidationError::new(
+                            "Range proof is required for confidential transfers",
                         ),
                     );
                 }
@@ -324,16 +362,20 @@ impl SubmitTransferRequest {
     pub fn new_confidential(
         from_address: String,
         to_address: String,
-        proof_data: String,
-        encrypted_amount: String,
+        new_decryptable_available_balance: String,
+        equality_proof: String,
+        ciphertext_validity_proof: String,
+        range_proof: String,
         token_mint: String,
     ) -> Self {
         Self {
             from_address,
             to_address,
             transfer_details: TransferType::Confidential {
-                proof_data,
-                encrypted_amount,
+                new_decryptable_available_balance,
+                equality_proof,
+                ciphertext_validity_proof,
+                range_proof,
             },
             token_mint: Some(token_mint),
         }
@@ -557,18 +599,22 @@ mod tests {
         let req = SubmitTransferRequest::new_confidential(
             "From".to_string(),
             "To".to_string(),
-            "proof".to_string(),
-            "cipher".to_string(),
+            "balance".to_string(),
+            "equality".to_string(),
+            "validity".to_string(),
+            "range".to_string(),
             "mint".to_string(),
         );
         assert!(req.validate().is_ok());
 
-        // Invalid Confidential (empty proof)
+        // Invalid Confidential (empty equality proof)
         let req = SubmitTransferRequest::new_confidential(
             "From".to_string(),
             "To".to_string(),
+            "balance".to_string(),
             "".to_string(),
-            "cipher".to_string(),
+            "validity".to_string(),
+            "range".to_string(),
             "mint".to_string(),
         );
         assert!(req.validate().is_err());
