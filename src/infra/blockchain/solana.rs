@@ -480,12 +480,14 @@ impl BlockchainClient for RpcBlockchainClient {
         })?;
 
         // Decode Base64 encrypted amount
-        let encrypted_amount = BASE64_STANDARD.decode(encrypted_amount_base64).map_err(|e| {
-            AppError::Validation(crate::domain::ValidationError::InvalidField {
-                field: "encrypted_amount".to_string(),
-                message: format!("Invalid base64 encoding: {}", e),
-            })
-        })?;
+        let encrypted_amount = BASE64_STANDARD
+            .decode(encrypted_amount_base64)
+            .map_err(|e| {
+                AppError::Validation(crate::domain::ValidationError::InvalidField {
+                    field: "encrypted_amount".to_string(),
+                    message: format!("Invalid base64 encoding: {}", e),
+                })
+            })?;
 
         debug!(
             proof_bytes = proof_data.len(),

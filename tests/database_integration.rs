@@ -266,11 +266,9 @@ async fn test_get_pending_blockchain_requests() {
         .expect("Failed to get pending requests");
 
     // Only the item with pending_submission status should be returned
+    // NOTE: The atomic claim logic updates status to Processing when fetching
     assert_eq!(pending.len(), 1);
-    assert_eq!(
-        pending[0].blockchain_status,
-        BlockchainStatus::PendingSubmission
-    );
+    assert_eq!(pending[0].blockchain_status, BlockchainStatus::Processing);
 }
 
 #[tokio::test]

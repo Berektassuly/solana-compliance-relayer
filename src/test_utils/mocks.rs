@@ -410,7 +410,10 @@ impl BlockchainClient for MockBlockchainClient {
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
             "confidential_transfer:{}:{}:{}:{}",
-            to_address, token_mint, proof_data.len(), encrypted_amount.len()
+            to_address,
+            token_mint,
+            proof_data.len(),
+            encrypted_amount.len()
         ));
         Ok(signature)
     }
