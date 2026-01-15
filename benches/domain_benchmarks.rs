@@ -11,6 +11,7 @@ fn bench_validation(c: &mut Criterion) {
             amount: 10_500_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     c.bench_function("validate_transfer_request", |b| {

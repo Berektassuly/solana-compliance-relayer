@@ -38,6 +38,7 @@ async fn test_submit_transfer_success() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let request = Request::builder()
@@ -69,6 +70,7 @@ async fn test_submit_transfer_validation_error() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let request = Request::builder()
@@ -123,6 +125,7 @@ async fn test_list_requests_with_pagination() {
                 amount: (i as u64) * 1_000_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         state.service.submit_transfer(&payload).await.unwrap();
     }
@@ -182,6 +185,7 @@ async fn test_get_request_success() {
             amount: 10_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();
 
@@ -231,6 +235,7 @@ async fn test_graceful_degradation_blockchain_failure() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let request = Request::builder()
@@ -336,6 +341,7 @@ async fn test_database_failure() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let request = Request::builder()
@@ -419,6 +425,7 @@ async fn test_retry_handler_not_eligible() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
     let created = state.service.submit_transfer(&payload).await.unwrap();
 

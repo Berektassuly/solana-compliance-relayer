@@ -46,6 +46,12 @@ impl AppService {
         &self,
         request: &SubmitTransferRequest,
     ) -> Result<TransferRequest, AppError> {
+        // Cryptographic signature verification (MUST be first - before any state changes)
+        request.verify_signature().map_err(|e| {
+            warn!(from = %request.from_address, error = %e, "Signature verification failed");
+            e
+        })?;
+
         request.validate().map_err(|e| {
             warn!(error = %e, "Validation failed");
             AppError::Validation(ValidationError::Multiple(e.to_string()))

@@ -347,6 +347,7 @@ mod tests {
                 amount: 1_000_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         let result = provider.check_compliance(&request).await;
         assert_eq!(result.unwrap(), ComplianceStatus::Approved);
@@ -362,6 +363,7 @@ mod tests {
                 amount: 1_000_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         let result = provider.check_compliance(&request).await;
         assert_eq!(result.unwrap(), ComplianceStatus::Rejected);

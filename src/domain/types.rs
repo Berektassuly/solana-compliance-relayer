@@ -1,9 +1,12 @@
 //! Domain types with validation support.
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
+
+use crate::domain::AppError;
 
 /// Status of blockchain submission for a transfer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
@@ -253,6 +256,13 @@ pub struct SubmitTransferRequest {
     #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub token_mint: Option<String>,
+
+    /// Base58-encoded Ed25519 signature proving ownership of from_address.
+    /// The message format is: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}"
+    #[schema(
+        example = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+    )]
+    pub signature: String,
 }
 
 impl Validate for SubmitTransferRequest {
@@ -331,13 +341,83 @@ impl Validate for SubmitTransferRequest {
 }
 
 impl SubmitTransferRequest {
+    /// Verify that the signature is valid for this request.
+    /// Returns Ok(()) if valid, or AppError::Authorization if invalid.
+    pub fn verify_signature(&self) -> Result<(), AppError> {
+        // Construct the deterministic message to verify
+        let message = self.create_signing_message();
+
+        // Decode the from_address as a Solana public key (32 bytes)
+        let pubkey_bytes = bs58::decode(&self.from_address).into_vec().map_err(|e| {
+            AppError::Authorization(format!("Invalid from_address encoding: {}", e))
+        })?;
+
+        if pubkey_bytes.len() != 32 {
+            return Err(AppError::Authorization(format!(
+                "Invalid from_address length: expected 32 bytes, got {}",
+                pubkey_bytes.len()
+            )));
+        }
+
+        let pubkey_array: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| AppError::Authorization("Invalid from_address format".to_string()))?;
+
+        let verifying_key = VerifyingKey::from_bytes(&pubkey_array)
+            .map_err(|e| AppError::Authorization(format!("Invalid public key: {}", e)))?;
+
+        // Decode the signature (64 bytes)
+        let sig_bytes = bs58::decode(&self.signature)
+            .into_vec()
+            .map_err(|e| AppError::Authorization(format!("Invalid signature encoding: {}", e)))?;
+
+        if sig_bytes.len() != 64 {
+            return Err(AppError::Authorization(format!(
+                "Invalid signature length: expected 64 bytes, got {}",
+                sig_bytes.len()
+            )));
+        }
+
+        let sig_array: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| AppError::Authorization("Invalid signature format".to_string()))?;
+
+        let signature = Signature::from_bytes(&sig_array);
+
+        // Verify the signature
+        verifying_key
+            .verify_strict(&message, &signature)
+            .map_err(|e| {
+                AppError::Authorization(format!("Signature verification failed: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    /// Create the deterministic message for signing.
+    /// Format: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}"
     #[must_use]
-    pub fn new(from_address: String, to_address: String, amount: u64) -> Self {
+    pub fn create_signing_message(&self) -> Vec<u8> {
+        let amount_part = match &self.transfer_details {
+            TransferType::Public { amount } => amount.to_string(),
+            TransferType::Confidential { .. } => "confidential".to_string(),
+        };
+        let mint_part = self.token_mint.as_deref().unwrap_or("SOL");
+        format!(
+            "{}:{}:{}:{}",
+            self.from_address, self.to_address, amount_part, mint_part
+        )
+        .into_bytes()
+    }
+
+    #[must_use]
+    pub fn new(from_address: String, to_address: String, amount: u64, signature: String) -> Self {
         Self {
             from_address,
             to_address,
             transfer_details: TransferType::Public { amount },
             token_mint: None,
+            signature,
         }
     }
 
@@ -348,17 +428,20 @@ impl SubmitTransferRequest {
         to_address: String,
         amount: u64,
         token_mint: String,
+        signature: String,
     ) -> Self {
         Self {
             from_address,
             to_address,
             transfer_details: TransferType::Public { amount },
             token_mint: Some(token_mint),
+            signature,
         }
     }
 
     /// Create a new Confidential transfer request
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_confidential(
         from_address: String,
         to_address: String,
@@ -367,6 +450,7 @@ impl SubmitTransferRequest {
         ciphertext_validity_proof: String,
         range_proof: String,
         token_mint: String,
+        signature: String,
     ) -> Self {
         Self {
             from_address,
@@ -378,6 +462,7 @@ impl SubmitTransferRequest {
                 range_proof,
             },
             token_mint: Some(token_mint),
+            signature,
         }
     }
 
@@ -580,19 +665,35 @@ mod tests {
     #[test]
     fn test_submit_transfer_request_validation() {
         // Valid request (1 SOL in lamports)
-        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 1_000_000_000);
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "To".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+        );
         assert!(req.validate().is_ok());
 
         // Invalid From (empty)
-        let req = SubmitTransferRequest::new("".to_string(), "To".to_string(), 1_000_000_000);
+        let req = SubmitTransferRequest::new(
+            "".to_string(),
+            "To".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+        );
         assert!(req.validate().is_err());
 
         // Invalid To (empty)
-        let req = SubmitTransferRequest::new("From".to_string(), "".to_string(), 1_000_000_000);
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+        );
         assert!(req.validate().is_err());
 
         // Invalid Amount (zero)
-        let req = SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0);
+        let req =
+            SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0, "sig".to_string());
         assert!(req.validate().is_err());
 
         // Valid Confidential Request
@@ -604,6 +705,7 @@ mod tests {
             "validity".to_string(),
             "range".to_string(),
             "mint".to_string(),
+            "sig".to_string(),
         );
         assert!(req.validate().is_ok());
 
@@ -616,6 +718,7 @@ mod tests {
             "validity".to_string(),
             "range".to_string(),
             "mint".to_string(),
+            "sig".to_string(),
         );
         assert!(req.validate().is_err());
     }

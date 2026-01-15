@@ -37,6 +37,7 @@ async fn test_full_transfer_lifecycle_flow() {
             amount: 50_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let create_request = Request::builder()
@@ -114,6 +115,7 @@ async fn test_post_bad_request_validation() {
             amount: 10_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     let request = Request::builder()

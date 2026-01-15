@@ -60,6 +60,7 @@ async fn test_create_and_get_transfer_request() {
             amount: 100_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
 
     // Create item
@@ -101,6 +102,7 @@ async fn test_list_requests_pagination() {
                 amount: (i as u64) * 1_000_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         client
             .submit_transfer(&request)
@@ -148,6 +150,7 @@ async fn test_blockchain_status_updates() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
     let created = client
         .submit_transfer(&request)
@@ -218,6 +221,7 @@ async fn test_get_pending_blockchain_requests() {
                 amount: 1_000_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         let item = client
             .submit_transfer(&request)
@@ -282,6 +286,7 @@ async fn test_increment_retry_count() {
             amount: 1_000_000_000,
         },
         token_mint: None,
+        signature: "dummy_sig".to_string(),
     };
     let created = client
         .submit_transfer(&request)

@@ -462,6 +462,7 @@ mod tests {
                 amount: 1_500_000_000,
             },
             token_mint: None,
+            signature: "dummy_sig".to_string(),
         };
         let tr = db.submit_transfer(&request).await.unwrap();
 
