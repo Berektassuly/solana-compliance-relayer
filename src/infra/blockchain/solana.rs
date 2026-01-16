@@ -156,7 +156,13 @@ impl SolanaRpcProvider for HttpSolanaRpcProvider {
     }
 }
 
-/// Solana RPC blockchain client
+/// Solana RPC blockchain client with provider strategy pattern
+///
+/// Auto-detects the RPC provider (Helius, QuickNode, Standard) and activates
+/// premium features accordingly:
+/// - Helius: Priority fee estimation, DAS compliance checks
+/// - QuickNode: Priority fee estimation
+/// - Standard: Fallback fee strategy
 pub struct RpcBlockchainClient {
     provider: Box<dyn SolanaRpcProvider>,
     config: RpcClientConfig,
@@ -164,6 +170,14 @@ pub struct RpcBlockchainClient {
     sdk_client: Option<SolanaRpcClient>,
     /// Solana keypair for signing transactions
     keypair: Option<Keypair>,
+    /// Auto-detected provider type
+    provider_type: super::strategies::RpcProviderType,
+    /// Priority fee estimation strategy
+    fee_strategy: Box<dyn super::strategies::FeeStrategy>,
+    /// Helius DAS client for compliance checks (only for Helius provider)
+    das_client: Option<super::helius::HeliusDasClient>,
+    /// RPC URL (stored for strategy use)
+    rpc_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,12 +240,51 @@ struct QuickNodePriorityFeeLevel {
 
 impl RpcBlockchainClient {
     /// Create a new RPC blockchain client with custom configuration
+    ///
+    /// Automatically detects the RPC provider type and activates premium features:
+    /// - **Helius**: Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks
+    /// - **QuickNode**: Priority fee estimation via `qn_estimatePriorityFees`
+    /// - **Standard**: Fallback to static priority fee
     pub fn new(
         rpc_url: &str,
         signing_key: SigningKey,
         config: RpcClientConfig,
     ) -> Result<Self, AppError> {
+        use super::helius::{HeliusDasClient, HeliusFeeStrategy};
+        use super::strategies::{FallbackFeeStrategy, QuickNodeFeeStrategy, RpcProviderType};
+
         let provider = HttpSolanaRpcProvider::new(rpc_url, signing_key.clone(), config.timeout)?;
+
+        // Auto-detect provider type from URL
+        let provider_type = RpcProviderType::detect(rpc_url);
+        info!(
+            provider = %provider_type.name(),
+            rpc_url = %rpc_url,
+            "Detected RPC provider type"
+        );
+
+        // Select fee strategy and DAS client based on provider type
+        let (fee_strategy, das_client): (
+            Box<dyn super::strategies::FeeStrategy>,
+            Option<HeliusDasClient>,
+        ) = match &provider_type {
+            RpcProviderType::Helius => {
+                info!("Helius Priority Fee Strategy activated!");
+                info!("Helius DAS Check enabled");
+                (
+                    Box::new(HeliusFeeStrategy::new(rpc_url)),
+                    Some(HeliusDasClient::new(rpc_url)),
+                )
+            }
+            RpcProviderType::QuickNode => {
+                info!("QuickNode Priority Fee Strategy activated");
+                (Box::new(QuickNodeFeeStrategy::new(rpc_url)), None)
+            }
+            RpcProviderType::Standard => {
+                info!("Standard RPC (fallback fee strategy)");
+                (Box::new(FallbackFeeStrategy::new()), None)
+            }
+        };
 
         // Create Solana SDK keypair from ed25519-dalek signing key
         let keypair_bytes = signing_key.to_keypair_bytes();
@@ -249,12 +302,23 @@ impl RpcBlockchainClient {
             CommitmentConfig::confirmed(),
         );
 
-        info!(rpc_url = %rpc_url, "Created blockchain client with SDK support");
+        info!(
+            rpc_url = %rpc_url,
+            provider = %provider_type.name(),
+            fee_strategy = %fee_strategy.name(),
+            das_enabled = das_client.is_some(),
+            "Created blockchain client with SDK support"
+        );
+
         Ok(Self {
             provider: Box::new(provider),
             config,
             sdk_client: Some(sdk_client),
             keypair: Some(keypair),
+            provider_type,
+            fee_strategy,
+            das_client,
+            rpc_url: rpc_url.to_string(),
         })
     }
 
@@ -265,12 +329,28 @@ impl RpcBlockchainClient {
 
     /// Create a new client with a specific provider (useful for testing)
     pub fn with_provider(provider: Box<dyn SolanaRpcProvider>, config: RpcClientConfig) -> Self {
+        use super::strategies::{FallbackFeeStrategy, RpcProviderType};
+
         Self {
             provider,
             config,
             sdk_client: None,
             keypair: None,
+            provider_type: RpcProviderType::Standard,
+            fee_strategy: Box::new(FallbackFeeStrategy::new()),
+            das_client: None,
+            rpc_url: String::new(),
         }
+    }
+
+    /// Get the detected provider type
+    pub fn provider_type(&self) -> &super::strategies::RpcProviderType {
+        &self.provider_type
+    }
+
+    /// Check if Helius DAS is available
+    pub fn has_das_support(&self) -> bool {
+        self.das_client.is_some()
     }
 
     /// Get the public key as base58 string
@@ -330,50 +410,24 @@ impl RpcBlockchainClient {
         }))
     }
 
-    /// Attempt to fetch priority fee from QuickNode's qn_estimatePriorityFees.
-    /// Returns the recommended priority fee in micro-lamports.
-    /// This method gracefully handles failures (e.g., non-QuickNode providers)
-    /// and falls back to a default value.
+    /// Get priority fee using the appropriate strategy for the detected provider.
+    ///
+    /// This method delegates to the configured fee strategy:
+    /// - Helius: Uses `getPriorityFeeEstimate` for transaction-aware estimation
+    /// - QuickNode: Uses `qn_estimatePriorityFees` for global estimation
+    /// - Standard: Returns a static fallback value
+    ///
+    /// # Arguments
+    /// * `serialized_tx` - Optional Base58-encoded serialized transaction
+    ///                     (used by Helius for per-account fee estimation)
+    async fn get_priority_fee(&self, serialized_tx: Option<&str>) -> u64 {
+        self.fee_strategy.get_priority_fee(serialized_tx).await
+    }
+
+    /// Legacy method for backward compatibility - calls the new strategy-based method
+    #[allow(dead_code)]
     async fn get_quicknode_priority_fee(&self) -> u64 {
-        const DEFAULT_PRIORITY_FEE: u64 = 100; // micro-lamports fallback
-
-        let params = serde_json::json!({
-            "last_n_blocks": 100,
-            "api_version": 2
-        });
-
-        match self
-            .provider
-            .send_request("qn_estimatePriorityFees", params)
-            .await
-        {
-            Ok(result) => match serde_json::from_value::<QuickNodePriorityFeeResponse>(result) {
-                Ok(response) => {
-                    if let Some(fees) = response.per_compute_unit
-                        && let Some(high) = fees.high
-                    {
-                        let fee = high as u64;
-                        info!(priority_fee = %fee, "Applied QuickNode priority fee (micro-lamports)");
-                        return fee;
-                    }
-                    debug!(
-                        "QuickNode response missing per_compute_unit.high, using default priority fee"
-                    );
-                    DEFAULT_PRIORITY_FEE
-                }
-                Err(e) => {
-                    debug!(error = %e, "Failed to parse QuickNode priority fee response, using default");
-                    DEFAULT_PRIORITY_FEE
-                }
-            },
-            Err(_) => {
-                debug!(
-                    "QuickNode priority fee API not available (provider may not support it), using default: {} micro-lamports",
-                    DEFAULT_PRIORITY_FEE
-                );
-                DEFAULT_PRIORITY_FEE
-            }
-        }
+        self.get_priority_fee(None).await
     }
 }
 
@@ -550,8 +604,8 @@ impl BlockchainClient for RpcBlockchainClient {
             "Derived confidential token accounts"
         );
 
-        // Get priority fee
-        let priority_fee = self.get_quicknode_priority_fee().await;
+        // Get priority fee using provider-specific strategy
+        let priority_fee = self.get_priority_fee(None).await;
 
         // ====================================================================
         // MULTI-TRANSACTION SPLIT PROOF VERIFICATION
@@ -627,11 +681,11 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Step 1a: Create the context account FIRST
         let create_equality_ctx_ix = system_instruction::create_account(
-            &keypair.pubkey(),           // payer
-            &equality_context_pubkey,    // new account
-            equality_rent,               // lamports for rent exemption
-            EQUALITY_CONTEXT_SIZE,       // account size in bytes
-            &zk_elgamal_proof_program,   // owner = ZK program
+            &keypair.pubkey(),         // payer
+            &equality_context_pubkey,  // new account
+            equality_rent,             // lamports for rent exemption
+            EQUALITY_CONTEXT_SIZE,     // account size in bytes
+            &zk_elgamal_proof_program, // owner = ZK program
         );
 
         // Step 1b: Build verify instruction using SDK enum for discriminator
@@ -653,8 +707,8 @@ impl BlockchainClient for RpcBlockchainClient {
         let equality_tx_instructions = vec![
             ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
             ComputeBudgetInstruction::set_compute_unit_limit(200_000),
-            create_equality_ctx_ix,  // CREATE first
-            equality_verify_ix,       // VERIFY second
+            create_equality_ctx_ix, // CREATE first
+            equality_verify_ix,     // VERIFY second
         ];
 
         let recent_blockhash = sdk_client
@@ -665,7 +719,7 @@ impl BlockchainClient for RpcBlockchainClient {
         let equality_tx = Transaction::new_signed_with_payer(
             &equality_tx_instructions,
             Some(&keypair.pubkey()),
-            &[keypair, &equality_context_keypair],  // Context keypair must sign create_account
+            &[keypair, &equality_context_keypair], // Context keypair must sign create_account
             recent_blockhash,
         );
 
@@ -673,9 +727,10 @@ impl BlockchainClient for RpcBlockchainClient {
             .send_and_confirm_transaction(&equality_tx)
             .await
             .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(
-                    format!("Equality proof verification failed: {}", e)
-                ))
+                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                    "Equality proof verification failed: {}",
+                    e
+                )))
             })?;
 
         info!("Equality proof verified and context state created");
@@ -695,7 +750,8 @@ impl BlockchainClient for RpcBlockchainClient {
         );
 
         // Step 2b: Build verify instruction
-        let validity_discriminator = ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity as u8;
+        let validity_discriminator =
+            ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity as u8;
         let mut validity_ix_data = vec![validity_discriminator];
         validity_ix_data.extend_from_slice(&ciphertext_validity_proof);
 
@@ -711,8 +767,8 @@ impl BlockchainClient for RpcBlockchainClient {
         let validity_tx_instructions = vec![
             ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
             ComputeBudgetInstruction::set_compute_unit_limit(200_000),
-            create_validity_ctx_ix,  // CREATE first
-            validity_verify_ix,       // VERIFY second
+            create_validity_ctx_ix, // CREATE first
+            validity_verify_ix,     // VERIFY second
         ];
 
         let recent_blockhash = sdk_client
@@ -723,7 +779,7 @@ impl BlockchainClient for RpcBlockchainClient {
         let validity_tx = Transaction::new_signed_with_payer(
             &validity_tx_instructions,
             Some(&keypair.pubkey()),
-            &[keypair, &validity_context_keypair],  // Context keypair must sign
+            &[keypair, &validity_context_keypair], // Context keypair must sign
             recent_blockhash,
         );
 
@@ -731,9 +787,10 @@ impl BlockchainClient for RpcBlockchainClient {
             .send_and_confirm_transaction(&validity_tx)
             .await
             .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(
-                    format!("Validity proof verification failed: {}", e)
-                ))
+                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                    "Validity proof verification failed: {}",
+                    e
+                )))
             })?;
 
         info!("Validity proof verified and context state created");
@@ -769,8 +826,8 @@ impl BlockchainClient for RpcBlockchainClient {
         let range_tx_instructions = vec![
             ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
             ComputeBudgetInstruction::set_compute_unit_limit(1_200_000), // Range proofs need more compute!
-            create_range_ctx_ix,   // CREATE first
-            range_verify_ix,        // VERIFY second
+            create_range_ctx_ix,                                         // CREATE first
+            range_verify_ix,                                             // VERIFY second
         ];
 
         let recent_blockhash = sdk_client
@@ -781,7 +838,7 @@ impl BlockchainClient for RpcBlockchainClient {
         let range_tx = Transaction::new_signed_with_payer(
             &range_tx_instructions,
             Some(&keypair.pubkey()),
-            &[keypair, &range_context_keypair],  // Context keypair must sign
+            &[keypair, &range_context_keypair], // Context keypair must sign
             recent_blockhash,
         );
 
@@ -789,9 +846,10 @@ impl BlockchainClient for RpcBlockchainClient {
             .send_and_confirm_transaction(&range_tx)
             .await
             .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(
-                    format!("Range proof verification failed: {}", e)
-                ))
+                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                    "Range proof verification failed: {}",
+                    e
+                )))
             })?;
 
         info!("Range proof verified and context state created");
@@ -841,8 +899,8 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Build instruction data: [extension_discriminator | sub_instruction | transfer_data]
         let mut instruction_data = Vec::new();
-        instruction_data.push(26u8);  // ConfidentialTransferExtension
-        instruction_data.push(7u8);   // Transfer sub-instruction
+        instruction_data.push(26u8); // ConfidentialTransferExtension
+        instruction_data.push(7u8); // Transfer sub-instruction
         instruction_data.extend_from_slice(&new_decryptable_balance);
 
         let transfer_ix = Instruction {
@@ -888,13 +946,15 @@ impl BlockchainClient for RpcBlockchainClient {
             .map_err(|e| {
                 let msg = e.to_string();
                 if msg.contains("ProofVerificationFailed") || msg.contains("proof") {
-                    AppError::Blockchain(BlockchainError::TransactionFailed(
-                        format!("ZK proof verification failed: {}", msg)
-                    ))
+                    AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                        "ZK proof verification failed: {}",
+                        msg
+                    )))
                 } else if msg.contains("ConfidentialTransferNotEnabled") {
-                    AppError::Blockchain(BlockchainError::TransactionFailed(
-                        format!("Mint does not have confidential transfer extension enabled: {}", msg)
-                    ))
+                    AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                        "Mint does not have confidential transfer extension enabled: {}",
+                        msg
+                    )))
                 } else {
                     map_solana_client_error(e)
                 }
@@ -1015,8 +1075,8 @@ impl BlockchainClient for RpcBlockchainClient {
             )))
         })?;
 
-        // Get priority fee (gracefully falls back to default if QuickNode not available)
-        let priority_fee = self.get_quicknode_priority_fee().await;
+        // Get priority fee using provider-specific strategy
+        let priority_fee = self.get_priority_fee(None).await;
 
         // Create transfer instruction using SDK
         let transfer_ix =
@@ -1188,8 +1248,8 @@ impl BlockchainClient for RpcBlockchainClient {
             }
         }
 
-        // Get priority fee (gracefully falls back to default if QuickNode not available)
-        let priority_fee = self.get_quicknode_priority_fee().await;
+        // Get priority fee using provider-specific strategy
+        let priority_fee = self.get_priority_fee(None).await;
 
         // Start with compute budget instruction for priority fee
         let mut instructions: Vec<Instruction> =
@@ -1266,6 +1326,40 @@ impl BlockchainClient for RpcBlockchainClient {
         );
 
         Ok(signature.to_string())
+    }
+
+    /// Check if a wallet holds compliant assets using Helius DAS.
+    ///
+    /// This method checks if the wallet holds any assets from sanctioned collections.
+    /// It is only available when using a Helius RPC provider.
+    ///
+    /// # Behavior by Provider
+    /// - **Helius**: Uses `getAssetsByOwner` DAS API to check asset collections
+    /// - **QuickNode/Standard**: Returns `true` (skip check, assume compliant)
+    ///
+    /// # Arguments
+    /// * `owner` - The wallet address (Base58) to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Wallet is compliant (no sanctioned assets or DAS not available)
+    /// * `Ok(false)` - Wallet holds sanctioned assets
+    /// * `Err(_)` - API error during check
+    #[instrument(skip(self))]
+    async fn check_wallet_assets(&self, owner: &str) -> Result<bool, AppError> {
+        match &self.das_client {
+            Some(das_client) => {
+                info!(wallet = %owner, "Helius DAS Check: Initiating asset scan");
+                das_client.check_wallet_compliance(owner).await
+            }
+            None => {
+                debug!(
+                    wallet = %owner,
+                    provider = %self.provider_type.name(),
+                    "DAS not available for this provider, skipping asset check"
+                );
+                Ok(true)
+            }
+        }
     }
 }
 

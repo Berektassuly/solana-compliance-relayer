@@ -4,8 +4,8 @@
 //!   cargo run --bin generate_transfer_request              # Public transfer
 //!   cargo run --bin generate_transfer_request -- --confidential  # Confidential transfer with ZK proofs
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use solana_compliance_relayer::domain::types::{SubmitTransferRequest, TransferType};
@@ -44,11 +44,7 @@ fn main() {
             generate_confidential_transfer()
         } else {
             let amount = 1_000_000_000u64; // 1 SOL
-            (
-                TransferType::Public { amount },
-                None,
-                amount.to_string(),
-            )
+            (TransferType::Public { amount }, None, amount.to_string())
         };
 
     // Construct the message exactly as the server expects for signing:
@@ -99,9 +95,21 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
     let aes_key = AeKey::new_rand();
 
     println!("Simulated account state:");
-    println!("Initial balance: {} lamports ({} SOL)", INITIAL_BALANCE, INITIAL_BALANCE / 1_000_000_000);
-    println!("Transfer amount: {} lamports ({} SOL)", TRANSFER_AMOUNT, TRANSFER_AMOUNT / 1_000_000_000);
-    println!("Remaining balance: {} lamports ({} SOL)", INITIAL_BALANCE - TRANSFER_AMOUNT, (INITIAL_BALANCE - TRANSFER_AMOUNT) / 1_000_000_000);
+    println!(
+        "Initial balance: {} lamports ({} SOL)",
+        INITIAL_BALANCE,
+        INITIAL_BALANCE / 1_000_000_000
+    );
+    println!(
+        "Transfer amount: {} lamports ({} SOL)",
+        TRANSFER_AMOUNT,
+        TRANSFER_AMOUNT / 1_000_000_000
+    );
+    println!(
+        "Remaining balance: {} lamports ({} SOL)",
+        INITIAL_BALANCE - TRANSFER_AMOUNT,
+        (INITIAL_BALANCE - TRANSFER_AMOUNT) / 1_000_000_000
+    );
 
     // Encrypt the current balance as ElGamal ciphertext (what's stored on-chain)
     let current_available_balance: ElGamalCiphertext =
@@ -148,9 +156,18 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
 
     // Print proof sizes for verification
     println!("\nProof sizes:");
-    println!("Equality proof:            {} bytes", equality_proof_bytes.len());
-    println!("Ciphertext validity proof: {} bytes", validity_proof_bytes.len());
-    println!("Range proof:               {} bytes", range_proof_bytes.len());
+    println!(
+        "Equality proof:            {} bytes",
+        equality_proof_bytes.len()
+    );
+    println!(
+        "Ciphertext validity proof: {} bytes",
+        validity_proof_bytes.len()
+    );
+    println!(
+        "Range proof:               {} bytes",
+        range_proof_bytes.len()
+    );
     println!("New decryptable balance:   36 bytes");
 
     // Use a random token mint for the confidential transfer
@@ -163,5 +180,9 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
         range_proof: range_proof_base64,
     };
 
-    (transfer_details, Some(token_mint), "confidential".to_string())
+    (
+        transfer_details,
+        Some(token_mint),
+        "confidential".to_string(),
+    )
 }

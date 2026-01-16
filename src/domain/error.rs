@@ -34,6 +34,10 @@ pub enum BlockchainError {
     InsufficientFunds,
     #[error("Timeout waiting for confirmation: {0}")]
     Timeout(String),
+    #[error("Helius API error: {0}")]
+    HeliusApiError(String),
+    #[error("DAS compliance check failed: {0}")]
+    DasComplianceFailed(String),
 }
 
 #[derive(Error, Debug)]

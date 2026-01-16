@@ -171,6 +171,20 @@ pub trait BlockchainClient: Send + Sync {
             "transfer_confidential not implemented".to_string(),
         ))
     }
+
+    /// Check if a wallet holds compliant assets using DAS (Digital Asset Standard).
+    /// This is a Helius-specific feature for compliance screening.
+    ///
+    /// Returns `false` if the wallet holds assets from sanctioned collections.
+    /// For non-Helius providers, returns `true` (skip check / assume compliant).
+    ///
+    /// # Arguments
+    /// * `owner` - The wallet address (Base58) to check
+    async fn check_wallet_assets(&self, owner: &str) -> Result<bool, AppError> {
+        let _ = owner;
+        // Default: skip check for providers without DAS support
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
