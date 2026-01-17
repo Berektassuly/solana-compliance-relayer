@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
