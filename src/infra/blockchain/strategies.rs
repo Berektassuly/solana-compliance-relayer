@@ -96,6 +96,7 @@ pub trait FeeStrategy: Send + Sync {
 /// Different providers offer different submission methods:
 /// - Standard: `sendTransaction` RPC
 /// - Helius: Smart Transactions with optimistic confirmation
+/// - QuickNode: Ghost Mode via Jito bundles (private submission)
 #[async_trait]
 pub trait SubmissionStrategy: Send + Sync {
     /// Submit a serialized transaction
@@ -114,6 +115,14 @@ pub trait SubmissionStrategy: Send + Sync {
 
     /// Human-readable strategy name for logging
     fn name(&self) -> &'static str;
+
+    /// Returns true if this strategy supports private/MEV-protected submission
+    ///
+    /// Private submission bypasses the public mempool for enhanced privacy.
+    /// Currently only available with QuickNode's Jito integration.
+    fn supports_private_submission(&self) -> bool {
+        false // Default: standard submission
+    }
 }
 
 // ============================================================================

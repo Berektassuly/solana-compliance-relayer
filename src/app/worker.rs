@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
+
+use crate::domain::types::TransferType;
+use crate::infra::privacy::PrivacyHealthCheckService;
 
 use super::service::AppService;
 
@@ -16,6 +19,8 @@ pub struct WorkerConfig {
     pub batch_size: i64,
     /// Whether the worker is enabled
     pub enabled: bool,
+    /// Whether to apply privacy health checks for confidential transfers
+    pub enable_privacy_checks: bool,
 }
 
 impl Default for WorkerConfig {
@@ -24,6 +29,7 @@ impl Default for WorkerConfig {
             poll_interval: Duration::from_secs(10),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: true,
         }
     }
 }
@@ -33,6 +39,7 @@ pub struct BlockchainRetryWorker {
     service: Arc<AppService>,
     config: WorkerConfig,
     shutdown_rx: watch::Receiver<bool>,
+    privacy_service: Option<Arc<PrivacyHealthCheckService>>,
 }
 
 impl BlockchainRetryWorker {
@@ -46,6 +53,22 @@ impl BlockchainRetryWorker {
             service,
             config,
             shutdown_rx,
+            privacy_service: None,
+        }
+    }
+
+    /// Create a new worker instance with privacy service
+    pub fn with_privacy_service(
+        service: Arc<AppService>,
+        config: WorkerConfig,
+        shutdown_rx: watch::Receiver<bool>,
+        privacy_service: Arc<PrivacyHealthCheckService>,
+    ) -> Self {
+        Self {
+            service,
+            config,
+            shutdown_rx,
+            privacy_service: Some(privacy_service),
         }
     }
 
@@ -110,6 +133,52 @@ impl BlockchainRetryWorker {
             }
         }
     }
+
+    /// Check privacy health for confidential transfers
+    ///
+    /// Returns the recommended delay in seconds, or 0 for immediate processing.
+    /// Only applies to confidential transfers when privacy checks are enabled.
+    async fn check_privacy_health(&self, request: &crate::domain::TransferRequest) -> u64 {
+        // Only check confidential transfers
+        let is_confidential = matches!(request.transfer_details, TransferType::Confidential { .. });
+
+        if !is_confidential || !self.config.enable_privacy_checks {
+            return 0;
+        }
+
+        let privacy_service = match &self.privacy_service {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        let token_mint = match &request.token_mint {
+            Some(mint) => mint,
+            None => return 0,
+        };
+
+        debug!(
+            request_id = %request.id,
+            token_mint = %token_mint,
+            "Checking privacy health for confidential transfer"
+        );
+
+        let health = privacy_service.check_health(token_mint).await;
+
+        if health.is_healthy {
+            0
+        } else {
+            let delay = health.recommended_delay_secs.unwrap_or(0);
+            if delay > 0 {
+                warn!(
+                    request_id = %request.id,
+                    delay_secs = delay,
+                    recent_tx_count = health.recent_tx_count,
+                    "Privacy health check: delaying submission for anonymity"
+                );
+            }
+            delay
+        }
+    }
 }
 
 /// Spawn the background worker as a tokio task
@@ -119,6 +188,19 @@ pub fn spawn_worker(
 ) -> (tokio::task::JoinHandle<()>, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
+    let handle = tokio::spawn(worker.run());
+    (handle, shutdown_tx)
+}
+
+/// Spawn the background worker with privacy service
+pub fn spawn_worker_with_privacy(
+    service: Arc<AppService>,
+    config: WorkerConfig,
+    privacy_service: Arc<PrivacyHealthCheckService>,
+) -> (tokio::task::JoinHandle<()>, watch::Sender<bool>) {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let worker =
+        BlockchainRetryWorker::with_privacy_service(service, config, shutdown_rx, privacy_service);
     let handle = tokio::spawn(worker.run());
     (handle, shutdown_tx)
 }

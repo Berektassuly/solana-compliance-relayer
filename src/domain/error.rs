@@ -38,6 +38,12 @@ pub enum BlockchainError {
     HeliusApiError(String),
     #[error("DAS compliance check failed: {0}")]
     DasComplianceFailed(String),
+    #[error("QuickNode API error: {0}")]
+    QuickNodeApiError(String),
+    #[error("Jito bundle submission failed: {0}")]
+    JitoBundleFailed(String),
+    #[error("Private submission unavailable, falling back: {0}")]
+    PrivateSubmissionFallback(String),
 }
 
 #[derive(Error, Debug)]

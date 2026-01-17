@@ -6,4 +6,4 @@ pub mod worker;
 
 pub use service::AppService;
 pub use state::AppState;
-pub use worker::{BlockchainRetryWorker, WorkerConfig, spawn_worker};
+pub use worker::{BlockchainRetryWorker, WorkerConfig, spawn_worker, spawn_worker_with_privacy};

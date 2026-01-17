@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::domain::{BlockchainClient, DatabaseClient};
+use crate::infra::privacy::PrivacyHealthCheckService;
 
 use super::service::AppService;
 
@@ -14,6 +15,8 @@ pub struct AppState {
     pub blockchain_client: Arc<dyn BlockchainClient>,
     /// Helius webhook secret for authentication (optional)
     pub helius_webhook_secret: Option<String>,
+    /// Privacy health check service for confidential transfers
+    pub privacy_service: Option<Arc<PrivacyHealthCheckService>>,
 }
 
 impl AppState {
@@ -45,6 +48,14 @@ impl AppState {
             db_client,
             blockchain_client,
             helius_webhook_secret,
+            privacy_service: None,
         }
+    }
+
+    /// Add privacy service to the application state (builder pattern)
+    #[must_use]
+    pub fn with_privacy_service(mut self, privacy_service: Arc<PrivacyHealthCheckService>) -> Self {
+        self.privacy_service = Some(privacy_service);
+        self
     }
 }

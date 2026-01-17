@@ -14,9 +14,15 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use solana_compliance_relayer::api::{
     RateLimitConfig, create_router, create_router_with_rate_limit,
 };
-use solana_compliance_relayer::app::{AppState, WorkerConfig, spawn_worker};
+use solana_compliance_relayer::app::{
+    AppState, WorkerConfig, spawn_worker, spawn_worker_with_privacy,
+};
 use solana_compliance_relayer::infra::RpcBlockchainClient;
-use solana_compliance_relayer::infra::{PostgresClient, PostgresConfig, signing_key_from_base58};
+use solana_compliance_relayer::infra::blockchain::{QuickNodeTokenApiClient, RpcProviderType};
+use solana_compliance_relayer::infra::{
+    PostgresClient, PostgresConfig, PrivacyHealthCheckConfig, PrivacyHealthCheckService,
+    signing_key_from_base58,
+};
 
 /// Application configuration
 struct Config {
@@ -35,6 +41,8 @@ struct Config {
     range_api_url: Option<String>,
     /// Helius webhook secret for authentication (optional)
     helius_webhook_secret: Option<String>,
+    /// Enable privacy health checks for confidential transfers
+    enable_privacy_checks: bool,
 }
 
 impl Config {
@@ -65,8 +73,15 @@ impl Config {
             .filter(|s| !s.is_empty());
 
         let rate_limit_config = RateLimitConfig::from_env();
+
+        // Privacy health check configuration
+        let enable_privacy_checks = env::var("ENABLE_PRIVACY_CHECKS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true); // Enabled by default
+
         let worker_config = WorkerConfig {
             enabled: enable_background_worker,
+            enable_privacy_checks,
             ..Default::default()
         };
 
@@ -83,6 +98,7 @@ impl Config {
             range_api_key,
             range_api_url,
             helius_webhook_secret,
+            enable_privacy_checks,
         })
     }
 
@@ -190,12 +206,12 @@ async fn main() -> Result<()> {
     }
 
     // Create application state
-    let app_state = Arc::new(AppState::with_helius_secret(
+    let mut app_state = AppState::with_helius_secret(
         Arc::new(postgres_client),
         Arc::new(blockchain_client),
         Arc::new(compliance_provider),
         config.helius_webhook_secret.clone(),
-    ));
+    );
 
     if config.helius_webhook_secret.is_some() {
         info!("   ✓ Helius webhook secret configured");
@@ -203,10 +219,48 @@ async fn main() -> Result<()> {
         info!("   ○ Helius webhook secret not configured (webhook auth disabled)");
     }
 
+    // Initialize privacy health check service (QuickNode only)
+    let privacy_service = if config.enable_privacy_checks {
+        let provider_type = RpcProviderType::detect(&config.blockchain_rpc_url);
+
+        if matches!(provider_type, RpcProviderType::QuickNode) {
+            let token_api_client =
+                Arc::new(QuickNodeTokenApiClient::new(&config.blockchain_rpc_url));
+            let privacy_config = PrivacyHealthCheckConfig::from_env();
+            let service = Arc::new(PrivacyHealthCheckService::new(
+                privacy_config,
+                Some(token_api_client),
+            ));
+            info!("   ✓ Privacy Health Check service initialized (QuickNode)");
+            Some(service)
+        } else {
+            info!("   ○ Privacy Health Check disabled (requires QuickNode RPC)");
+            None
+        }
+    } else {
+        info!("   ○ Privacy Health Check disabled via config");
+        None
+    };
+
+    // Add privacy service to app state if available
+    if let Some(ref privacy_svc) = privacy_service {
+        app_state = app_state.with_privacy_service(Arc::clone(privacy_svc));
+    }
+
+    let app_state = Arc::new(app_state);
+
     // Start background worker if enabled
     let worker_shutdown_tx = if config.enable_background_worker {
-        let (_handle, shutdown_tx) =
-            spawn_worker(Arc::clone(&app_state.service), config.worker_config);
+        let (handle_result, shutdown_tx) = if let Some(ref privacy_svc) = privacy_service {
+            spawn_worker_with_privacy(
+                Arc::clone(&app_state.service),
+                config.worker_config.clone(),
+                Arc::clone(privacy_svc),
+            )
+        } else {
+            spawn_worker(Arc::clone(&app_state.service), config.worker_config.clone())
+        };
+        let _ = handle_result; // We don't need the handle here
         info!("   ✓ Background worker started");
         Some(shutdown_tx)
     } else {
