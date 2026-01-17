@@ -4,6 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use ed25519_dalek::SigningKey;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -17,6 +18,39 @@ use solana_compliance_relayer::test_utils::{
     MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
 };
 
+/// Deterministic test secret key for reproducible tests
+const TEST_SECRET_KEY: [u8; 32] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
+];
+
+/// Helper to create a properly signed transfer request
+fn create_signed_transfer_request(to_idx: u32, amount: u64) -> SubmitTransferRequest {
+    let signing_key = SigningKey::from_bytes(&TEST_SECRET_KEY);
+    let from_address = bs58::encode(signing_key.verifying_key().as_bytes()).into_string();
+
+    // For to_address, we just need a valid Base58 string (doesn't need to verify signatures)
+    let mut to_bytes = [0u8; 32];
+    to_bytes[0] = (to_idx & 0xFF) as u8;
+    to_bytes[1] = ((to_idx >> 8) & 0xFF) as u8;
+    let to_address = bs58::encode(&to_bytes).into_string();
+
+    let transfer_details = TransferType::Public { amount };
+
+    // Create signing message: "{from_address}:{to_address}:{amount}:{SOL}"
+    let message = format!("{}:{}:{}:SOL", from_address, to_address, amount);
+    let signature = signing_key.sign(message.as_bytes());
+    let signature_b58 = bs58::encode(signature.to_bytes()).into_string();
+
+    SubmitTransferRequest {
+        from_address,
+        to_address,
+        transfer_details,
+        token_mint: None,
+        signature: signature_b58,
+    }
+}
+
 fn create_test_state() -> Arc<AppState> {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
@@ -29,16 +63,10 @@ async fn test_full_transfer_lifecycle_flow() {
     let state = create_test_state();
     let router = create_router(state);
 
-    // 1. POST - Create Transfer Request
-    let create_payload = SubmitTransferRequest {
-        from_address: "SenderAddress".to_string(),
-        to_address: "ReceiverAddress".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 50_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    // 1. POST - Create Transfer Request with valid signature
+    let create_payload = create_signed_transfer_request(1, 50_000_000_000);
+    let expected_from = create_payload.from_address.clone();
+    let expected_to = create_payload.to_address.clone();
 
     let create_request = Request::builder()
         .method("POST")
@@ -58,7 +86,7 @@ async fn test_full_transfer_lifecycle_flow() {
         .to_bytes();
     let created_request: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
     let request_id = created_request.id;
-    assert_eq!(created_request.from_address, "SenderAddress");
+    assert_eq!(created_request.from_address, expected_from);
     assert_eq!(
         created_request.transfer_details,
         TransferType::Public {
@@ -79,7 +107,7 @@ async fn test_full_transfer_lifecycle_flow() {
     let body_bytes = get_response.into_body().collect().await.unwrap().to_bytes();
     let retrieved_request: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(retrieved_request.id, request_id);
-    assert_eq!(retrieved_request.to_address, "ReceiverAddress");
+    assert_eq!(retrieved_request.to_address, expected_to);
 
     // 3. GET - List requests and verify the new request is present
     let list_request = Request::builder()
@@ -107,16 +135,9 @@ async fn test_post_bad_request_validation() {
     let state = create_test_state();
     let router = create_router(state);
 
-    // Missing required field or invalid data (e.g., empty from_address)
-    let bad_payload = SubmitTransferRequest {
-        from_address: "".to_string(), // Invalid
-        to_address: "ValidAddress".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 10_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    // Create a valid signed request but with amount=0 to trigger validation error
+    // (signature verification passes, but validation fails)
+    let bad_payload = create_signed_transfer_request(1, 0); // Invalid: amount is 0
 
     let request = Request::builder()
         .method("POST")
