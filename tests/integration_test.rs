@@ -6,6 +6,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use ed25519_dalek::{Signer, SigningKey};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -19,6 +20,41 @@ use solana_compliance_relayer::test_utils::{
     MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
 };
 
+// Test keypair - a deterministic keypair for testing
+// Secret key bytes (32 bytes of zeros for test purposes)
+const TEST_SECRET_KEY: [u8; 32] = [0u8; 32];
+
+/// Create a valid test transfer request with proper Ed25519 signature
+fn create_signed_transfer_request(
+    _from_idx: u32,
+    to_idx: u32,
+    amount: u64,
+) -> SubmitTransferRequest {
+    let signing_key = SigningKey::from_bytes(&TEST_SECRET_KEY);
+    let from_address = bs58::encode(signing_key.verifying_key().as_bytes()).into_string();
+
+    // For to_address, we just need a valid Base58 string (doesn't need to verify signatures)
+    let mut to_bytes = [0u8; 32];
+    to_bytes[0] = (to_idx & 0xFF) as u8;
+    to_bytes[1] = ((to_idx >> 8) & 0xFF) as u8;
+    let to_address = bs58::encode(&to_bytes).into_string();
+
+    let transfer_details = TransferType::Public { amount };
+
+    // Create signing message: "{from_address}:{to_address}:{amount}:{SOL}"
+    let message = format!("{}:{}:{}:SOL", from_address, to_address, amount);
+    let signature = signing_key.sign(message.as_bytes());
+    let signature_b58 = bs58::encode(signature.to_bytes()).into_string();
+
+    SubmitTransferRequest {
+        from_address,
+        to_address,
+        transfer_details,
+        token_mint: None,
+        signature: signature_b58,
+    }
+}
+
 fn create_test_state() -> Arc<AppState> {
     let db = Arc::new(MockDatabaseClient::new());
     let blockchain = Arc::new(MockBlockchainClient::new());
@@ -31,15 +67,8 @@ async fn test_submit_transfer_success() {
     let state = create_test_state();
     let router = create_router(state);
 
-    let payload = SubmitTransferRequest {
-        from_address: "FromAddr".to_string(),
-        to_address: "ToAddr".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 1_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    let payload = create_signed_transfer_request(0, 1, 1_000_000_000);
+    let expected_from = payload.from_address.clone();
 
     let request = Request::builder()
         .method("POST")
@@ -53,7 +82,7 @@ async fn test_submit_transfer_success() {
 
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     let tr: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(tr.from_address, "FromAddr");
+    assert_eq!(tr.from_address, expected_from);
     assert_eq!(tr.blockchain_status, BlockchainStatus::PendingSubmission);
 }
 
@@ -62,16 +91,9 @@ async fn test_submit_transfer_validation_error() {
     let state = create_test_state();
     let router = create_router(state);
 
-    // Invalid payload (empty from_address)
-    let payload = SubmitTransferRequest {
-        from_address: "".to_string(),
-        to_address: "ToAddr".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 1_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    // Start with valid request and break it (empty from_address after signature creation)
+    // This triggers validation error, not authorization error
+    let payload = create_signed_transfer_request(0, 1, 0); // Invalid: amount is 0
 
     let request = Request::builder()
         .method("POST")
@@ -81,6 +103,10 @@ async fn test_submit_transfer_validation_error() {
         .unwrap();
 
     let response = router.oneshot(request).await.unwrap();
+    // Signature verification happens BEFORE validation, so with amount=0 in signature
+    // but we need empty from_address to trigger validation error (400).
+    // Actually, authorization (403) is checked first due to verify_signature first.
+    // Let's test that an amount of 0 returns BAD_REQUEST since validation fails after sig check.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -118,15 +144,7 @@ async fn test_list_requests_with_pagination() {
 
     // Create some items
     for i in 1..5 {
-        let payload = SubmitTransferRequest {
-            from_address: format!("From{}", i),
-            to_address: format!("To{}", i),
-            transfer_details: TransferType::Public {
-                amount: (i as u64) * 1_000_000_000,
-            },
-            token_mint: None,
-            signature: "dummy_sig".to_string(),
-        };
+        let payload = create_signed_transfer_request(0, i, (i as u64) * 1_000_000_000);
         state.service.submit_transfer(&payload).await.unwrap();
     }
 
@@ -178,15 +196,7 @@ async fn test_get_request_success() {
     ));
 
     // Create an item
-    let payload = SubmitTransferRequest {
-        from_address: "From".to_string(),
-        to_address: "To".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 10_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    let payload = create_signed_transfer_request(0, 1, 10_000_000_000);
     let created = state.service.submit_transfer(&payload).await.unwrap();
 
     let router = create_router(state);
@@ -228,15 +238,7 @@ async fn test_graceful_degradation_blockchain_failure() {
     let state = Arc::new(AppState::new(Arc::clone(&db) as _, blockchain, compliance));
     let router = create_router(state);
 
-    let payload = SubmitTransferRequest {
-        from_address: "From".to_string(),
-        to_address: "To".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 1_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    let payload = create_signed_transfer_request(0, 1, 1_000_000_000);
 
     let request = Request::builder()
         .method("POST")
@@ -334,15 +336,7 @@ async fn test_database_failure() {
     let state = Arc::new(AppState::new(db, blockchain, compliance));
     let router = create_router(state);
 
-    let payload = SubmitTransferRequest {
-        from_address: "From".to_string(),
-        to_address: "To".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 1_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    let payload = create_signed_transfer_request(0, 1, 1_000_000_000);
 
     let request = Request::builder()
         .method("POST")
@@ -418,15 +412,7 @@ async fn test_retry_handler_not_eligible() {
     ));
 
     // Create an item with Submitted status (not eligible for retry)
-    let payload = SubmitTransferRequest {
-        from_address: "From".to_string(),
-        to_address: "To".to_string(),
-        transfer_details: TransferType::Public {
-            amount: 1_000_000_000,
-        },
-        token_mint: None,
-        signature: "dummy_sig".to_string(),
-    };
+    let payload = create_signed_transfer_request(0, 1, 1_000_000_000);
     let created = state.service.submit_transfer(&payload).await.unwrap();
 
     let router = create_router(state);
