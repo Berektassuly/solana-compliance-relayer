@@ -484,6 +484,7 @@ impl QuickNodeTokenApiClient {
         #[derive(Debug, Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct TokenMetadata {
+            #[allow(dead_code)]
             #[serde(default)]
             holder_count: Option<u64>,
             #[serde(default)]

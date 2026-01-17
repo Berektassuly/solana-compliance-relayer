@@ -249,17 +249,16 @@ impl FeeStrategy for QuickNodeFeeStrategy {
                     .await
                 {
                     Ok(rpc_response) => {
-                        if let Some(result) = rpc_response.result {
-                            if let Some(fees) = result.per_compute_unit {
-                                if let Some(high) = fees.high {
-                                    let fee = high as u64;
-                                    info!(
-                                        priority_fee = %fee,
-                                        "⚡ QuickNode priority fee applied (micro-lamports)"
-                                    );
-                                    return fee;
-                                }
-                            }
+                        if let Some(result) = rpc_response.result
+                            && let Some(fees) = result.per_compute_unit
+                            && let Some(high) = fees.high
+                        {
+                            let fee = high as u64;
+                            info!(
+                                priority_fee = %fee,
+                                "⚡ QuickNode priority fee applied (micro-lamports)"
+                            );
+                            return fee;
                         }
                         debug!("QuickNode response missing fee data, using default");
                         self.default_fee

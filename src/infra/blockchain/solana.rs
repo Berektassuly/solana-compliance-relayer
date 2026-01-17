@@ -176,7 +176,8 @@ pub struct RpcBlockchainClient {
     fee_strategy: Box<dyn super::strategies::FeeStrategy>,
     /// Helius DAS client for compliance checks (only for Helius provider)
     das_client: Option<super::helius::HeliusDasClient>,
-    /// RPC URL (stored for strategy use)
+    /// RPC URL (stored for strategy use and future integration)
+    #[allow(dead_code)]
     rpc_url: String,
 }
 
@@ -223,12 +224,14 @@ struct SignatureStatusResult {
 }
 
 /// Response structure for QuickNode's qn_estimatePriorityFees API
+#[allow(dead_code)] // Scaffolded for QuickNode fee strategy
 #[derive(Debug, Deserialize)]
 struct QuickNodePriorityFeeResponse {
     per_compute_unit: Option<QuickNodePriorityFeeLevel>,
 }
 
 /// Priority fee levels from QuickNode API (values in micro-lamports)
+#[allow(dead_code)] // Scaffolded for QuickNode fee strategy
 #[derive(Debug, Deserialize)]
 struct QuickNodePriorityFeeLevel {
     high: Option<f64>,
@@ -419,7 +422,7 @@ impl RpcBlockchainClient {
     ///
     /// # Arguments
     /// * `serialized_tx` - Optional Base58-encoded serialized transaction
-    ///                     (used by Helius for per-account fee estimation)
+    ///   (used by Helius for per-account fee estimation)
     async fn get_priority_fee(&self, serialized_tx: Option<&str>) -> u64 {
         self.fee_strategy.get_priority_fee(serialized_tx).await
     }

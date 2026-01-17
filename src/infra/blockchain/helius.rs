@@ -275,18 +275,17 @@ impl HeliusDasClient {
         for asset in &result.items {
             if let Some(grouping) = &asset.grouping {
                 for group in grouping {
-                    if group.group_key == "collection" {
-                        if let Some(group_value) = &group.group_value {
-                            if SANCTIONED_COLLECTIONS.contains(&group_value.as_str()) {
-                                warn!(
-                                    wallet = %owner,
-                                    sanctioned_collection = %group_value,
-                                    asset_id = %asset.id,
-                                    "DAS Check FAILED: Wallet holds sanctioned asset"
-                                );
-                                return Ok(false);
-                            }
-                        }
+                    if group.group_key == "collection"
+                        && let Some(group_value) = &group.group_value
+                        && SANCTIONED_COLLECTIONS.contains(&group_value.as_str())
+                    {
+                        warn!(
+                            wallet = %owner,
+                            sanctioned_collection = %group_value,
+                            asset_id = %asset.id,
+                            "DAS Check FAILED: Wallet holds sanctioned asset"
+                        );
+                        return Ok(false);
                     }
                 }
             }

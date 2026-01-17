@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
 
     // Start background worker if enabled
     let worker_shutdown_tx = if config.enable_background_worker {
-        let (handle_result, shutdown_tx) = if let Some(ref privacy_svc) = privacy_service {
+        let (_worker_handle, shutdown_tx) = if let Some(ref privacy_svc) = privacy_service {
             spawn_worker_with_privacy(
                 Arc::clone(&app_state.service),
                 config.worker_config.clone(),
@@ -260,7 +260,6 @@ async fn main() -> Result<()> {
         } else {
             spawn_worker(Arc::clone(&app_state.service), config.worker_config.clone())
         };
-        let _ = handle_result; // We don't need the handle here
         info!("   ✓ Background worker started");
         Some(shutdown_tx)
     } else {

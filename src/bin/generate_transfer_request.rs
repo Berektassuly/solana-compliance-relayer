@@ -28,7 +28,7 @@ fn main() {
     let verify_key = signing_key.verifying_key();
 
     // Convert to Solana Pubkeys for consistent display
-    let from_pubkey = Pubkey::try_from(verify_key.to_bytes()).unwrap();
+    let from_pubkey = Pubkey::from(verify_key.to_bytes());
     // Use a random destination address
     let to_pubkey = Pubkey::new_unique();
 

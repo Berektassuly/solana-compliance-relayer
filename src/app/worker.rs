@@ -39,6 +39,8 @@ pub struct BlockchainRetryWorker {
     service: Arc<AppService>,
     config: WorkerConfig,
     shutdown_rx: watch::Receiver<bool>,
+    /// Privacy service for anonymity set health checks (used for confidential transfers)
+    #[allow(dead_code)] // Scaffolded for future integration
     privacy_service: Option<Arc<PrivacyHealthCheckService>>,
 }
 
@@ -138,6 +140,7 @@ impl BlockchainRetryWorker {
     ///
     /// Returns the recommended delay in seconds, or 0 for immediate processing.
     /// Only applies to confidential transfers when privacy checks are enabled.
+    #[allow(dead_code)] // Scaffolded for future integration
     async fn check_privacy_health(&self, request: &crate::domain::TransferRequest) -> u64 {
         // Only check confidential transfers
         let is_confidential = matches!(request.transfer_details, TransferType::Confidential { .. });
@@ -236,6 +239,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             batch_size: 20,
             enabled: false,
+            enable_privacy_checks: false,
         };
         assert_eq!(config.poll_interval, Duration::from_secs(5));
         assert_eq!(config.batch_size, 20);
@@ -257,6 +261,7 @@ mod tests {
             poll_interval: Duration::from_secs(30),
             batch_size: 50,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let config2 = config1.clone();
         assert_eq!(config1.poll_interval, config2.poll_interval);
@@ -271,6 +276,7 @@ mod tests {
             poll_interval: Duration::from_millis(100),
             batch_size: 10,
             enabled: false, // Disabled
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -291,6 +297,7 @@ mod tests {
             poll_interval: Duration::from_secs(60), // Long poll so it doesn't trigger
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -316,6 +323,7 @@ mod tests {
             poll_interval: Duration::from_secs(60),
             batch_size: 10,
             enabled: false, // Disabled so it returns immediately
+            enable_privacy_checks: false,
         };
 
         let (handle, shutdown_tx) = spawn_worker(service, config);
@@ -353,6 +361,7 @@ mod tests {
             poll_interval: Duration::from_millis(100),
             batch_size: 10,
             enabled: false,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -372,6 +381,7 @@ mod tests {
             poll_interval: Duration::from_secs(60),
             batch_size: 5,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -388,6 +398,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
             batch_size: 42,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -402,6 +413,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -424,6 +436,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -441,6 +454,7 @@ mod tests {
             poll_interval: Duration::from_secs(60),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -467,6 +481,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -492,6 +507,7 @@ mod tests {
             poll_interval: Duration::from_secs(60),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
 
         let (handle, shutdown_tx) = spawn_worker(service, config);
@@ -514,6 +530,7 @@ mod tests {
             poll_interval: Duration::from_secs(60),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -571,6 +588,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         let (_, shutdown_rx) = watch::channel(false);
         let worker = BlockchainRetryWorker::new(service, config, shutdown_rx);
@@ -589,6 +607,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
             batch_size: 0,
             enabled: true,
+            enable_privacy_checks: false,
         };
         assert_eq!(config.batch_size, 0);
     }
@@ -599,6 +618,7 @@ mod tests {
             poll_interval: Duration::from_millis(1),
             batch_size: 10,
             enabled: true,
+            enable_privacy_checks: false,
         };
         assert_eq!(config.poll_interval, Duration::from_millis(1));
     }
