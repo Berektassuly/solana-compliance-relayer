@@ -52,8 +52,8 @@ governor = "0.10.4"
 
 # Solana SDK
 solana-sdk = "3.0.0"
-solana-client = "3.0.0"
-solana-commitment-config = "3.0.0"
+solana-client = "3.1.6"
+solana-commitment-config = "3.1.0"
 solana-system-interface = { version = "3.0.0", features = ["bincode"] }
 spl-token = "9.0.0"
 solana-program-pack = "3.0.0"
@@ -62,10 +62,13 @@ spl-associated-token-account = "8.0.0"
 solana-compute-budget-interface = "3.0.0"
 bytemuck = "1.14"
 spl-token-2022 = "10.0.0"
+spl-token-client = "0.18.0"
 
 # ZK Proof Generation for Confidential Transfers
 spl-token-confidential-transfer-proof-generation = "0.5.1"
+spl-token-confidential-transfer-proof-extraction = "0.5.1"
 solana-zk-sdk = "4.0.0"
+spl-record = "0.4.0"
 
 [dev-dependencies]
 solana-compliance-relayer = { path = ".", features = ["test-utils"] }

@@ -7,7 +7,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use solana_compliance_relayer::domain::types::{SubmitTransferRequest, TransferType};
 use solana_sdk::pubkey::Pubkey;
 
@@ -23,10 +22,14 @@ fn main() {
     let is_confidential = args.iter().any(|arg| arg == "--confidential");
 
     // 1. Generate a random Ed25519 keypair for transaction signing
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
+    // let mut csprng = OsRng;
+    // let signing_key = SigningKey::generate(&mut csprng);
+    const MY_PRIVATE_KEY_B58: &str =
+        "3UNZciMppCp3btFvxwAWfhN1dp99YUYrxDS7F9Gf4mYumUkeYENZMXdmfJRe2zofqvLkvabb9YkbiusuS7uKJbxu";
+    // let signing_key = SigningKey::from_bytes(&[0; 32]).unwrap();
+    let key_bytes = bs58::decode(MY_PRIVATE_KEY_B58).into_vec().unwrap();
+    let signing_key = SigningKey::from_bytes(key_bytes[..32].try_into().expect("key must be 32 bytes"));
     let verify_key = signing_key.verifying_key();
-
     // Convert to Solana Pubkeys for consistent display
     let from_pubkey = Pubkey::from(verify_key.to_bytes());
     // Use a random destination address
@@ -86,7 +89,7 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
     println!("Generating CONFIDENTIAL transfer with real ZK proofs...\n");
 
     // Simulated account state
-    const INITIAL_BALANCE: u64 = 10_000_000_000; // 10 SOL in lamports
+    const INITIAL_BALANCE: u64 = 100_000_000_000; // 10 SOL in lamports
     const TRANSFER_AMOUNT: u64 = 1_000_000_000; // 1 SOL in lamports
 
     // Generate cryptographic keys
