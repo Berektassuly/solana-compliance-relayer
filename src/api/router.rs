@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::{HeaderValue, Method};
 use axum::{
     Json, Router,
     body::Body,
@@ -20,6 +21,7 @@ use governor::{
 };
 use tower::ServiceBuilder;
 use tower_http::{
+    cors::{Any, CorsLayer},
     timeout::TimeoutLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
@@ -177,6 +179,44 @@ async fn rate_limit_health_middleware(
     }
 }
 
+/// Create CORS layer for cross-origin requests
+fn create_cors_layer() -> CorsLayer {
+    let allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "https://solana-compliance-relayer-frontend.berektassuly.com".to_string()
+    });
+
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    // Add localhost for development
+    let mut all_origins = origins;
+    if let Ok(val) = "http://localhost:3000".parse() {
+        all_origins.push(val);
+    }
+    if let Ok(val) = "http://localhost:3001".parse() {
+        all_origins.push(val);
+    }
+
+    CorsLayer::new()
+        .allow_origin(all_origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(Any)
+        .expose_headers([
+            "X-RateLimit-Limit".parse().unwrap(),
+            "X-RateLimit-Remaining".parse().unwrap(),
+            "Retry-After".parse().unwrap(),
+        ])
+        .max_age(Duration::from_secs(86400)) // 24 hours
+}
+
 /// Create router without rate limiting
 pub fn create_router(app_state: Arc<AppState>) -> Router {
     let middleware = ServiceBuilder::new()
@@ -212,6 +252,7 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
+        .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -262,6 +303,7 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
+        .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))

@@ -36,9 +36,11 @@ FROM debian:bookworm-slim AS runtime
 # Install runtime dependencies
 # - ca-certificates: Required for HTTPS connections (Solana RPC, Range API)
 # - libssl3: Required for TLS/SSL connections
+# - curl: Required for HEALTHCHECK
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
