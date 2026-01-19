@@ -27,10 +27,8 @@ use solana_zk_sdk::zk_elgamal_proof_program::{
     instruction::{ContextStateInfo, ProofInstruction},
     proof_data::{
         BatchedGroupedCiphertext3HandlesValidityProofContext,
-        BatchedGroupedCiphertext3HandlesValidityProofData,
-        BatchedRangeProofContext,
-        BatchedRangeProofU128Data,
-        CiphertextCommitmentEqualityProofContext,
+        BatchedGroupedCiphertext3HandlesValidityProofData, BatchedRangeProofContext,
+        BatchedRangeProofU128Data, CiphertextCommitmentEqualityProofContext,
         CiphertextCommitmentEqualityProofData,
     },
     state::ProofContextState,
@@ -664,8 +662,11 @@ impl BlockchainClient for RpcBlockchainClient {
         // NOT the full ProofData (which includes the proof itself).
         //
         // Use std::mem::size_of on the actual types to get exact sizes:
-        let equality_context_size = std::mem::size_of::<ProofContextState<CiphertextCommitmentEqualityProofContext>>();
-        let validity_context_size = std::mem::size_of::<ProofContextState<BatchedGroupedCiphertext3HandlesValidityProofContext>>();
+        let equality_context_size =
+            std::mem::size_of::<ProofContextState<CiphertextCommitmentEqualityProofContext>>();
+        let validity_context_size = std::mem::size_of::<
+            ProofContextState<BatchedGroupedCiphertext3HandlesValidityProofContext>,
+        >();
         let range_context_size = std::mem::size_of::<ProofContextState<BatchedRangeProofContext>>();
 
         debug!(
@@ -705,11 +706,11 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Step 1a: Create the context account FIRST
         let create_equality_ctx_ix = system_instruction::create_account(
-            &keypair.pubkey(),         // payer
-            &equality_context_pubkey,  // new account
-            equality_rent,             // lamports for rent exemption
+            &keypair.pubkey(),            // payer
+            &equality_context_pubkey,     // new account
+            equality_rent,                // lamports for rent exemption
             equality_context_size as u64, // account size in bytes
-            &zk_elgamal_proof_program, // owner = ZK program
+            &zk_elgamal_proof_program,    // owner = ZK program
         );
 
         // Step 1b: Build verify instruction using SDK's encode_verify_proof
@@ -723,7 +724,8 @@ impl BlockchainClient for RpcBlockchainClient {
             })?;
 
         // Create context state info for the SDK
-        let equality_ctx_address = solana_sdk::pubkey::Pubkey::from(equality_context_pubkey.to_bytes());
+        let equality_ctx_address =
+            solana_sdk::pubkey::Pubkey::from(equality_context_pubkey.to_bytes());
         let authority_address = solana_sdk::pubkey::Pubkey::from(context_authority.to_bytes());
         let equality_context_info = ContextStateInfo {
             context_state_account: &equality_ctx_address,
@@ -788,7 +790,8 @@ impl BlockchainClient for RpcBlockchainClient {
                 })
             })?;
 
-        let validity_ctx_address = solana_sdk::pubkey::Pubkey::from(validity_context_pubkey.to_bytes());
+        let validity_ctx_address =
+            solana_sdk::pubkey::Pubkey::from(validity_context_pubkey.to_bytes());
         let validity_context_info = ContextStateInfo {
             context_state_account: &validity_ctx_address,
             context_state_authority: &authority_address,
@@ -839,8 +842,8 @@ impl BlockchainClient for RpcBlockchainClient {
         info!("Transaction 3: Verifying range proof (record-based for large proof)");
 
         // Parse the range proof data first to validate it
-        let _range_proof_data: &BatchedRangeProofU128Data =
-            bytemuck::try_from_bytes(&range_proof).map_err(|e| {
+        let _range_proof_data: &BatchedRangeProofU128Data = bytemuck::try_from_bytes(&range_proof)
+            .map_err(|e| {
                 AppError::Validation(crate::domain::ValidationError::InvalidField {
                     field: "range_proof".to_string(),
                     message: format!("Invalid proof data format: {}", e),
@@ -855,7 +858,7 @@ impl BlockchainClient for RpcBlockchainClient {
         // Record account data layout: [32 bytes authority] [data...]
         const RECORD_HEADER_SIZE: usize = 32;
         let record_data_size = RECORD_HEADER_SIZE + range_proof.len();
-        
+
         let range_proof_record_rent = sdk_client
             .get_minimum_balance_for_rent_exemption(record_data_size)
             .await
@@ -943,7 +946,8 @@ impl BlockchainClient for RpcBlockchainClient {
 
         // Use encode_verify_proof_from_account instead of encode_verify_proof
         // The spl-record account has a 32-byte authority header, so offset = 32
-        let range_proof_record_address = solana_sdk::pubkey::Pubkey::from(range_proof_record_pubkey.to_bytes());
+        let range_proof_record_address =
+            solana_sdk::pubkey::Pubkey::from(range_proof_record_pubkey.to_bytes());
         let range_verify_from_account_ix = ProofInstruction::VerifyBatchedRangeProofU128
             .encode_verify_proof_from_account(
                 Some(range_context_info),

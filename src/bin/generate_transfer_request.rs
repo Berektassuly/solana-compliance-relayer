@@ -28,7 +28,8 @@ fn main() {
         "3UNZciMppCp3btFvxwAWfhN1dp99YUYrxDS7F9Gf4mYumUkeYENZMXdmfJRe2zofqvLkvabb9YkbiusuS7uKJbxu";
     // let signing_key = SigningKey::from_bytes(&[0; 32]).unwrap();
     let key_bytes = bs58::decode(MY_PRIVATE_KEY_B58).into_vec().unwrap();
-    let signing_key = SigningKey::from_bytes(key_bytes[..32].try_into().expect("key must be 32 bytes"));
+    let signing_key =
+        SigningKey::from_bytes(key_bytes[..32].try_into().expect("key must be 32 bytes"));
     let verify_key = signing_key.verifying_key();
     // Convert to Solana Pubkeys for consistent display
     let from_pubkey = Pubkey::from(verify_key.to_bytes());
