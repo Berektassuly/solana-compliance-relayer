@@ -2,54 +2,108 @@
 
 # Solana Compliance Relayer
 
+### Bridging the gap between on-chain privacy, regulatory compliance, and high-throughput execution.
+
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Solana](https://img.shields.io/badge/Solana-9945FF?style=for-the-badge&logo=solana&logoColor=white)](https://solana.com/)
+[![Helius](https://img.shields.io/badge/Helius-FF5733?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PC9zdmc+&logoColor=white)](https://helius.dev/)
+[![QuickNode](https://img.shields.io/badge/QuickNode-195AD2?style=for-the-badge&logo=quicknode&logoColor=white)](https://www.quicknode.com/)
+[![Range Protocol](https://img.shields.io/badge/Range%20Protocol-6D28D9?style=for-the-badge&logo=shield&logoColor=white)](https://www.rangeprotocol.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge)](LICENSE)
-[![Track](https://img.shields.io/badge/Track-Privacy%20Tooling-3B82F6?style=for-the-badge)](https://www.rangeprotocol.com/)
 [![Author](https://img.shields.io/badge/Author-Berektassuly.com-F97316?style=for-the-badge)](https://berektassuly.com)
-
-**A transactional gateway that screens wallet addresses via Range Protocol before relaying transactions to Solana, bridging privacy-preserving protocols with regulatory compliance.**
-
 </div>
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Why This Exists](#why-this-exists)
+- [How It Works](#how-it-works)
 - [Architecture](#architecture)
-- [Data Flow](#data-flow)
 - [Key Features](#key-features)
-- [Tech Stack](#tech-stack)
+- [Technical Stack](#technical-stack)
+- [RPC Provider Strategy](#rpc-provider-strategy)
+- [Transaction Lifecycle](#transaction-lifecycle)
 - [Getting Started](#getting-started)
+- [Environment Configuration](#environment-configuration)
 - [API Reference](#api-reference)
-- [Guide](docs/GUIDE.md)
-- [Configuration](#configuration)
+- [CLI Tools](#cli-tools)
 - [Testing](#testing)
+- [Deployment](#deployment)
 - [Roadmap](#roadmap)
 - [Contact](#contact)
-- [License](#license)
 
 ---
 
-## Overview
+## Why This Exists
 
-Privacy-preserving protocols face a fundamental tension between user confidentiality and regulatory compliance. The Solana Compliance Relayer implements a **Defense-in-Depth** architecture that decouples compliance screening from transaction execution, enabling institutions to adopt privacy technologies while satisfying AML/KYC/OFAC requirements.
+Privacy-preserving protocols on Solana face a fundamental paradox: **users demand confidentiality**, but **institutions require auditability**. The Solana Compliance Relayer resolves this tension through a **Defense-in-Depth** architecture that:
 
-| Layer | Responsibility |
-|-------|----------------|
-| API Gateway | Request validation, rate limiting |
-| Compliance Port | Address screening via Range Protocol |
-| Persistence Layer | Audit trail with full status history |
-| Blockchain Port | Transaction relay via Helius RPC |
+| Challenge | Solution |
+|-----------|----------|
+| Blinded signing risk | Client-side WASM signing ensures wallets never expose private keys to the server |
+| Regulatory compliance | Real-time AML/Sanctions screening via Range Protocol before chain submission |
+| Transaction guarantees | Transactional Outbox pattern with PostgreSQL ensures no approved tx is ever lost |
+| Finalization visibility | Helius Enhanced Webhooks notify the system when transactions are confirmed |
 
-**Key Guarantee:** Rejected transactions are persisted for audit purposes but are never submitted to the blockchain.
+> **Core Guarantee:** Rejected transactions are persisted for audit but **never** submitted to the blockchain.
+
+---
+
+## How It Works
+
+The system implements a **three-stage pipeline**:
+
+1. **Client-Side Cryptography (WASM)**: The browser compiles Rust-based Ed25519 signing logic to WebAssembly. Users sign transaction intent locally, eliminating private key exposure.
+
+2. **Compliance Gate (Range Protocol)**: Before any blockchain call, wallet addresses are screened against sanctions lists, PEP databases, and on-chain risk signals.
+
+3. **Execution & Finalization (Helius)**: Approved transactions are submitted via Helius RPC with priority fee optimization. Webhooks provide real-time confirmation callbacks.
 
 ---
 
 ## Architecture
 
 This project implements **Hexagonal Architecture** (Ports and Adapters), ensuring clean separation between business logic and infrastructure concerns.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           FRONTEND (Next.js)                            │
+│  ┌───────────────────┐    ┌──────────────────┐    ┌─────────────────┐   │
+│  │   Terminal Panel  │    │  WASM Signer     │    │  Monitor Panel  │   │
+│  │   (Transfer UI)   │──▶│  (Ed25519-dalek) │    │  (5s Polling)   │   │
+│  └───────────────────┘    └────────┬─────────┘    └─────────────────┘   │
+└────────────────────────────────────┼────────────────────────────────────┘
+                                     │ Signed Request
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           BACKEND (Axum + Rust)                         │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                        API Layer                                │    │
+│  │  POST /transfer-requests  │  GET /transfer-requests/{id}        │    │
+│  │  POST /webhooks/helius    │  GET /health                        │    │
+│  └──────────────────────────────┬──────────────────────────────────┘    │
+│                                 │                                       │
+│  ┌──────────────────────────────▼──────────────────────────────────┐    │
+│  │                      Application Layer                          │    │
+│  │  ┌─────────────┐    ┌───────────────────┐   ┌──────────────────┐│    │
+│  │  │ AppService  │──▶│ ComplianceProvider│──▶│ DatabaseClient   ││    │
+│  │  └─────────────┘    │ (Range Protocol)  │   │ (PostgreSQL)     ││    │
+│  │                     └───────────────────┘   └──────────────────┘│    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                 │                                       │
+│  ┌──────────────────────────────▼──────────────────────────────────┐    │
+│  │                    Infrastructure Layer                         │    │
+│  │  ┌──────────────────┐   ┌───────────────────┐                   │    │
+│  │  │ Background Worker│──▶│ BlockchainClient  │──▶ Helius RPC    │    │
+│  │  │ (10s poll cycle) │   │ (Strategy Pattern)│                   │    │
+│  │  └──────────────────┘   └───────────────────┘                   │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Directory Structure
 
 ```
 src/
@@ -59,66 +113,68 @@ src/
 │   └── error.rs     # Unified error types
 ├── app/             # Application layer (Use Cases)
 │   ├── service.rs   # Business logic orchestration
-│   └── worker.rs    # Background retry worker
+│   └── worker.rs    # Background retry worker with exponential backoff
 ├── api/             # HTTP interface (Primary Adapter)
-│   ├── handlers.rs  # Axum route handlers
-│   └── router.rs    # OpenAPI-documented routes
+│   ├── handlers.rs  # Axum route handlers with OpenAPI docs
+│   └── router.rs    # Rate limiting, CORS, middleware
 └── infra/           # External integrations (Secondary Adapters)
-    ├── database/    # PostgreSQL via SQLx
-    ├── blockchain/  # Solana via Helius RPC
+    ├── database/    # PostgreSQL via SQLx (compile-time checked)
+    ├── blockchain/  # Solana via Helius/QuickNode/Standard RPC
     └── compliance/  # Range Protocol integration
 ```
 
-### Transactional Outbox Pattern
-
-The system implements the **Transactional Outbox** pattern for guaranteed delivery:
-
-1. **API Layer** validates and persists requests to PostgreSQL atomically
-2. **Background Worker** polls for approved-but-unsubmitted transactions
-3. **Blockchain Adapter** submits transactions with exponential backoff retry
-4. **Status Updates** are persisted after each state transition
-
-This pattern ensures no approved transaction is lost, even during service restarts or network failures.
-
 ---
 
-## Data Flow
+## Data Flow Sequence
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API as API Layer (Axum)
+    participant User as User Browser
+    participant WASM as WASM Signer
+    participant API as Axum API
     participant Range as Range Protocol
     participant DB as PostgreSQL
     participant Worker as Background Worker
     participant Helius as Helius RPC
-    participant Solana as Solana Network
+    participant Webhook as Helius Webhook
 
-    Client->>API: POST /transfer-requests
-    API->>API: Validate request
+    User->>WASM: Initiate Transfer
+    WASM->>WASM: Ed25519 Sign (Client-Side)
+    WASM->>API: POST /transfer-requests (Signed Payload)
+    
+    API->>API: Verify Ed25519 Signature
     API->>Range: check_compliance(address)
     
-    alt Address Sanctioned
-        Range-->>API: Rejected
+    alt Address Sanctioned/High Risk
+        Range-->>API: Rejected (riskScore ≥ 70)
         API->>DB: Persist (compliance_status: rejected)
-        API-->>Client: 200 OK (rejected)
+        API-->>User: 200 OK {status: "rejected"}
     else Address Clean
-        Range-->>API: Approved
-        API->>DB: Persist (compliance_status: approved)
-        API->>Helius: transfer_sol()
-        Helius->>Solana: Submit transaction
-        Solana-->>Helius: Signature
-        Helius-->>API: tx_signature
-        API->>DB: Update (blockchain_status: submitted)
-        API-->>Client: 200 OK (submitted)
+        Range-->>API: Approved (riskScore < 70)
+        API->>DB: Persist (compliance_status: approved, blockchain_status: pending_submission)
+        API-->>User: 200 OK {status: "pending_submission"}
     end
 
     loop Every 10 seconds
-        Worker->>DB: Poll pending + approved
-        Worker->>Helius: Retry submissions
-        Helius->>Solana: Submit transaction
-        Worker->>DB: Update status
+        Worker->>DB: Poll (blockchain_status = pending_submission AND compliance_status = approved)
+        Worker->>DB: Update (blockchain_status: processing)
+        Worker->>Helius: sendTransaction()
+        
+        alt Submission Success
+            Helius-->>Worker: Transaction Signature
+            Worker->>DB: Update (blockchain_status: submitted, signature: <sig>)
+        else Submission Failure
+            Worker->>DB: Increment retry_count, calculate exponential backoff
+            Note over Worker,DB: Status remains pending_submission until max retries (10)
+        end
     end
+
+    Helius->>Helius: Transaction Finalized on Solana
+    Helius->>Webhook: POST /webhooks/helius (Enhanced Transaction)
+    Webhook->>API: Receive Confirmation
+    API->>DB: Update (blockchain_status: confirmed)
+    
+    Note over User,DB: Frontend polls GET /transfer-requests every 5s to reflect final status
 ```
 
 ---
@@ -126,31 +182,119 @@ sequenceDiagram
 ## Key Features
 
 | Feature | Description |
-|---------|-------------|
-| Real-time AML Screening | Pluggable compliance provider with Range Protocol adapter |
-| Reliable Transaction Delivery | Transactional outbox with Helius RPC integration |
-| Idempotency | UUID-based request tracking prevents duplicate submissions |
-| Exponential Backoff | Up to 10 retries with configurable backoff strategy |
-| Rate Limiting | Configurable limits via Governor middleware |
-| Graceful Shutdown | SIGTERM/SIGINT handling with in-flight request completion |
-| OpenAPI Documentation | Auto-generated Swagger UI at `/swagger-ui` |
-| Health Monitoring | Database and blockchain connectivity checks |
+|-----------|-------------|
+| **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
+| **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
+| **Automated AML/Compliance Screening** | Range Protocol integration with risk score evaluation (≥70 = rejected) |
+| **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
+| **Resilient Background Worker** | Exponential backoff retries (up to 10 attempts, max 5-minute delay) |
+| **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` → `confirmed` |
+| **Provider Strategy Pattern** | Auto-detects Helius/QuickNode for premium features (priority fees, DAS) |
+| **Rate Limiting** | Governor-based middleware with configurable RPS and burst limits |
+| **OpenAPI Documentation** | Auto-generated Swagger UI at `/swagger-ui` |
 
 ---
 
-## Tech Stack
+## Technical Stack
+
+### Backend
 
 | Component | Technology |
 |-----------|------------|
 | Language | Rust 1.75+ |
 | Web Framework | Axum 0.8 |
-| Database | PostgreSQL 16+ (SQLx) |
+| Database | PostgreSQL 16+ (SQLx with compile-time verification) |
 | Async Runtime | Tokio |
 | HTTP Client | Reqwest |
-| Cryptography | ed25519-dalek |
-| Serialization | Serde |
-| Validation | Validator |
-| Documentation | utoipa (OpenAPI 3.0) |
+| Rate Limiting | Governor |
+| API Docs | utoipa (OpenAPI 3.0) |
+| Middleware | Tower-HTTP (tracing, timeout, CORS) |
+
+### Frontend
+
+| Component | Technology |
+|-----------|------------|
+| Framework | Next.js 14 (App Router) |
+| Styling | Tailwind CSS |
+| State Management | TanStack Query (React Query) |
+| Build | Turbopack |
+
+### Cryptography
+
+| Component | Technology |
+|-----------|------------|
+| Signing | Ed25519-dalek (WASM-compiled) |
+| ZK Proofs | solana-zk-sdk, spl-token-confidential-transfer-proof-generation |
+| Key Derivation | ElGamal, AES-256 |
+
+### Infrastructure
+
+| Component | Technology |
+|-----------|------------|
+| RPC Provider | Helius / QuickNode (auto-detected) |
+| Compliance | Range Protocol Risk API |
+| Deployment (Backend) | Railway |
+| Deployment (Frontend) | Vercel |
+| Database Hosting | Railway PostgreSQL |
+
+---
+
+## RPC Provider Strategy
+
+The relayer implements a **Provider Strategy Pattern** that auto-detects the RPC endpoint and activates premium features accordingly:
+
+| Provider | Detection | Features |
+|----------|-----------|----------|
+| **Helius** | URL contains `helius-rpc.com` | Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks, Enhanced Webhooks |
+| **QuickNode** | URL contains `quiknode.pro` or `quicknode.com` | Priority fee estimation via `qn_estimatePriorityFees`, Privacy Health Check service, Ghost Mode (Jito bundles) |
+| **Standard** | Any other RPC | Static fallback fee strategy (5000 micro-lamports) |
+
+### QuickNode-Specific Features
+
+- **Priority Fee Estimation**: Uses the `qn_estimatePriorityFees` RPC method to fetch real-time fee recommendations
+- **Privacy Health Check Service**: Monitors token activity to recommend optimal submission timing for confidential transfers
+- **Ghost Mode Integration**: Scaffolded for private transaction submission via Jito bundles
+
+### Configuration Examples
+
+```env
+# Helius (recommended for webhooks)
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+
+# QuickNode (recommended for privacy features)
+SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
+
+# Standard RPC (development only)
+SOLANA_RPC_URL=https://api.devnet.solana.com
+```
+
+---
+
+## Transaction Lifecycle
+
+Transactions progress through the following states:
+
+```
+┌─────────┐    ┌───────────────────┐    ┌────────────┐    ┌───────────┐    ┌───────────┐
+│ Pending │──▶│ PendingSubmission │───▶│ Processing │──▶│ Submitted │───▶│ Confirmed │
+└─────────┘    └───────────────────┘    └────────────┘    └───────────┘    └───────────┘
+                        │                      │                                  │
+                        │                      │                                  │
+                        ▼                      ▼                                  │
+                   ┌──────────┐           ┌─────────┐                             │
+                   │  Failed  │◀─────────│  Retry  │◀────────────────────────────┘
+                   │(10 tries)│           │(backoff)│    (if webhook reports error)
+                   └──────────┘           └─────────┘
+```
+
+| Status | Trigger | Next State |
+|--------|---------|------------|
+| `pending` | Initial creation | → `pending_submission` (after compliance check) |
+| `pending_submission` | Compliance approved, queued for worker | → `processing` |
+| `processing` | Worker claimed task | → `submitted` (success) or retry (failure) |
+| `submitted` | Transaction propagated to Solana | → `confirmed` (via webhook) |
+| `confirmed` | Helius webhook confirms finalization | Terminal state |
+| `failed` | Max retries (10) exceeded | Terminal state |
 
 ---
 
@@ -158,149 +302,179 @@ sequenceDiagram
 
 ### Prerequisites
 
-- Rust 1.75 or later
-- Docker and Docker Compose
-- PostgreSQL 16+ (provided via Docker)
-
-### Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-# Required
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/compliance_relayer
-
-# Blockchain Configuration
-SOLANA_RPC_URL=https://api.devnet.solana.com
-ISSUER_PRIVATE_KEY=YOUR_BASE58_ENCODED_PRIVATE_KEY_HERE
-
-# Server Configuration
-HOST=0.0.0.0
-PORT=3000
-
-# Feature Flags
-ENABLE_RATE_LIMITING=false
-ENABLE_BACKGROUND_WORKER=true
-```
+- Rust 1.75+
+- Node.js 18+ (for frontend)
+- Docker & Docker Compose
+- PostgreSQL 16+
 
 ### Quick Start
 
 ```bash
 # Clone the repository
 git clone https://github.com/berektassuly/solana-compliance-relayer.git
+git clone https://github.com/Berektassuly/solana-compliance-relayer-frontend.git
 cd solana-compliance-relayer
 
 # Start PostgreSQL
 docker-compose up -d
 
-# Run the application
+# Run database migrations
+cargo sqlx migrate run
+
+# Start the backend
 cargo run
+
+# In another terminal, start the frontend
+cd frontend
+pnpm install
+pnpm run dev
 ```
 
-The server will start on `http://localhost:3000`.
+The backend will start on `http://localhost:3000`.
+The frontend will start on `http://localhost:3001`.
+
+---
+
+## Environment Configuration
+
+Create a `.env` file in the project root. See `.env.example` for all options.
+
+### Critical Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | ✅ | PostgreSQL connection string |
+| `SOLANA_RPC_URL` | ✅ | Solana RPC endpoint (Helius recommended) |
+| `ISSUER_PRIVATE_KEY` | ✅ | Base58 relayer wallet private key |
+| `HELIUS_API_KEY` | ⚡ | Enables priority fees and DAS checks (auto-detected from RPC URL) |
+| `HELIUS_WEBHOOK_SECRET` | ⚡ | Authorization header for webhook validation |
+| `RANGE_API_KEY` | ⚠️ | Range Protocol API key (mock mode if absent) |
+
+> ⚡ = Highly recommended for production  
+> ⚠️ = Falls back to mock mode if not set
+
+### Example Production Configuration
+
+```env
+# Database
+DATABASE_URL=postgres://user:pass@host:5432/compliance_relayer
+
+# Blockchain (Helius)
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+ISSUER_PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
+HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
+
+# Compliance
+RANGE_API_KEY=YOUR_RANGE_KEY
+
+# Server
+HOST=0.0.0.0
+PORT=3000
+
+# Features
+ENABLE_RATE_LIMITING=true
+ENABLE_BACKGROUND_WORKER=true
+```
 
 ---
 
 ## API Reference
 
-### Endpoints
+### Core Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/transfer-requests` | Submit a new transfer request |
-| GET | `/transfer-requests` | List all transfers (paginated) |
-| GET | `/transfer-requests/{id}` | Get transfer by ID |
-| GET | `/health` | Health check |
+| `POST` | `/transfer-requests` | Submit a signed transfer request |
+| `GET` | `/transfer-requests` | List transfers (paginated) |
+| `GET` | `/transfer-requests/{id}` | Get transfer by ID |
+| `POST` | `/transfer-requests/{id}/retry` | Retry failed submission |
+| `POST` | `/webhooks/helius` | Helius webhook receiver |
+| `GET` | `/health` | Detailed health check |
+| `GET` | `/health/live` | Kubernetes liveness probe |
+| `GET` | `/health/ready` | Kubernetes readiness probe |
 
 ### Interactive Documentation
 
 - **Swagger UI:** `http://localhost:3000/swagger-ui`
 - **OpenAPI Spec:** `http://localhost:3000/api-docs/openapi.json`
 
-### Example Request
+### Example: Submit Public Transfer
 
 ```bash
 curl -X POST http://localhost:3000/transfer-requests \
   -H "Content-Type: application/json" \
   -d '{
-    "from_address": "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF",
-    "to_address": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
-    "amount_sol": 0.5
+    "from_address": "YOUR_WALLET_PUBKEY",
+    "to_address": "RECIPIENT_PUBKEY",
+    "transfer_details": {
+      "type": "public",
+      "amount": 1000000000
+    },
+    "signature": "BASE58_ED25519_SIGNATURE"
   }'
 ```
 
-### Response Schema
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "from_address": "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF",
-  "to_address": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
-  "amount_sol": 0.5,
-  "compliance_status": "approved",
-  "blockchain_status": "submitted",
-  "blockchain_signature": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp...",
-  "blockchain_retry_count": 0,
-  "created_at": "2026-01-12T16:00:00Z",
-  "updated_at": "2026-01-12T16:00:00Z"
-}
-```
-
 ---
 
-## Documentation
+## CLI Tools
 
-For a step-by-step testing walkthrough with curl examples, see the [Judge's Testing Guide](docs/GUIDE.md).
+The project includes CLI utilities for generating valid transfer requests with proper Ed25519 signatures.
 
----
+### generate_transfer_request
 
-## Configuration
+Generates a complete, signed transfer request and outputs a ready-to-use curl command.
 
-### Compliance Status Values
+```bash
+# Generate a public SOL transfer (1 SOL)
+cargo run --bin generate_transfer_request
 
-| Status | Description |
-|--------|-------------|
-| `pending` | Awaiting compliance check |
-| `approved` | Passed sanctions screening |
-| `rejected` | Failed sanctions screening |
-
-### Blockchain Status Values
-
-| Status | Description |
-|--------|-------------|
-| `pending` | Not yet processed |
-| `pending_submission` | Queued for blockchain submission |
-| `submitted` | Transaction sent to network |
-| `confirmed` | Transaction confirmed on-chain |
-| `failed` | Max retries exceeded |
-
-### Supported Providers
-
-The Solana Compliance Relayer is **RPC-agnostic** and works with any Solana RPC provider. Configure via the `SOLANA_RPC_URL` environment variable.
-
-| Provider | Configuration Example |
-|----------|----------------------|
-| **Helius** | `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY` |
-| **QuickNode** | `SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY` |
-| **Alchemy** | `SOLANA_RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR_API_KEY` |
-| **Devnet** | `SOLANA_RPC_URL=https://api.devnet.solana.com` (default) |
-
-> [!TIP]
-> For production deployments, we recommend **Helius** or **QuickNode** for their reliability and enhanced APIs. The default Solana devnet RPC is suitable for development and testing only.
-
-#### Example `.env` Configuration
-
-```env
-# Production with Helius
-SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=your-helius-key
-RANGE_API_KEY=your-range-protocol-key
-ISSUER_PRIVATE_KEY=your-base58-private-key
-
-# Development (uses default devnet, mock compliance)
-SOLANA_RPC_URL=https://api.devnet.solana.com
-# RANGE_API_KEY not set = mock compliance mode
+# Generate a confidential transfer with real ZK proofs
+cargo run --bin generate_transfer_request -- --confidential
 ```
 
+**Example Output (Public Transfer):**
+
+```
+Generated Keypair:
+   Public Key (from_address): 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
+   Private Key (keep safe):   [32 bytes...]
+
+--------------------------------------------------
+
+Signing Message: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU:randomDest...:1000000000:SOL"
+
+Generated curl command:
+
+curl -X POST 'http://localhost:3000/transfer-requests' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "from_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "to_address": "randomDestination...",
+    "transfer_details": {
+      "type": "public",
+      "amount": 1000000000
+    },
+    "signature": "BASE58_SIGNATURE..."
+  }'
+```
+
+**Confidential Transfer Mode:**
+
+When using `--confidential`, the tool:
+1. Generates ElGamal and AES encryption keys
+2. Simulates an account with 10 SOL balance
+3. Produces real ZK proofs (equality, ciphertext validity, range)
+4. Outputs a complete request with Base64-encoded proof data
+
+```bash
+cargo run --bin generate_transfer_request -- --confidential
+```
+
+This outputs:
+- Equality proof (~200 bytes)
+- Ciphertext validity proof (~400 bytes)  
+- Range proof (~700 bytes)
+- New decryptable balance (36 bytes)
 
 ---
 
@@ -310,13 +484,42 @@ SOLANA_RPC_URL=https://api.devnet.solana.com
 # Run all tests
 cargo test
 
-# Run with coverage
-cargo tarpaulin --out Html
+# Run with verbose output
+cargo test -- --nocapture
 
 # Run integration tests (requires Docker)
 cargo test --test integration_test
-cargo test --test database_integration
+
+# Run with coverage
+cargo tarpaulin --out Html
 ```
+
+---
+
+## Deployment
+
+### Railway (Backend)
+
+1. Connect repository to Railway
+2. Add PostgreSQL service
+3. Set environment variables
+4. Configure build command: `cargo build --release`
+5. Configure start command: `./target/release/solana-compliance-relayer`
+
+### Vercel (Frontend)
+
+1. Import frontend directory
+2. Configure environment variables for API URL
+3. Deploy with default Next.js preset
+
+### Helius Webhook Configuration
+
+1. Go to Helius Dashboard → Webhooks
+2. Create new webhook:
+   - **URL:** `https://your-backend.railway.app/webhooks/helius`
+   - **Type:** Enhanced Transactions
+   - **Auth Header:** Your `HELIUS_WEBHOOK_SECRET` value
+   - **Account Addresses:** Add your relayer wallet public key
 
 ---
 
@@ -327,9 +530,10 @@ cargo test --test database_integration
 | 1 | Core relayer with Range Protocol | Complete |
 | 2 | Background worker with exponential backoff | Complete |
 | 3 | Rate limiting and observability | Complete |
-| 4 | Zero-Knowledge proof support (Light Protocol) | Planned |
-| 5 | Multi-signature governance | Planned |
-| 6 | MEV protection via Jito bundles | Planned |
+| 4 | WASM client-side signing | Complete |
+| 5 | Helius webhook integration | Complete |
+| 6 | Next.js frontend with real-time monitoring | Complete |
+| 7 | Token-2022 confidential transfer support | Complete |
 
 ---
 
