@@ -33,6 +33,9 @@
 - [Deployment](#deployment)
 - [Roadmap](#roadmap)
 - [Contact](#contact)
+- [Guide](docs/GUIDE.md)
+- [Contributing](CONTRIBUTING.md)
+- [License](LICENSE)
 
 ---
 
