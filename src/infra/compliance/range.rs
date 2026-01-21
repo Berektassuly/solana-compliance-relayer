@@ -186,13 +186,25 @@ impl RangeComplianceProvider {
 
     /// Determine compliance status from risk response
     ///
-    /// Rule: If riskScore >= 70 OR riskLevel contains "High" or "Severe",
-    /// return ComplianceStatus::Rejected. Otherwise, return ComplianceStatus::Approved.
+    /// Range API riskScore is 1-10:
+    ///   10 = CRITICAL RISK (directly malicious)
+    ///   9-8 = Extremely high risk
+    ///   7-6 = High risk
+    ///   5-4 = Medium risk
+    ///   3-2 = Low risk
+    ///   1 = Very low risk
+    ///
+    /// Rule: Reject if riskScore >= 6 (High risk and above)
+    /// OR if riskLevel text contains high-risk indicators
     fn evaluate_risk(&self, response: &RiskResponse) -> ComplianceStatus {
-        // High risk logic: Score >= 70 or risk level description indicating high/severe risk
-        let is_high_risk = response.risk_score >= 70
-            || response.risk_level.contains("High")
-            || response.risk_level.contains("Severe");
+        let risk_level_lower = response.risk_level.to_lowercase();
+
+        // Reject High risk (6-7), Extremely high (8-9), and Critical (10)
+        let is_high_risk = response.risk_score >= 6
+            || risk_level_lower.contains("high")
+            || risk_level_lower.contains("severe")
+            || risk_level_lower.contains("critical")
+            || risk_level_lower.contains("extremely");
 
         if is_high_risk {
             info!(
@@ -273,11 +285,11 @@ mod tests {
     fn test_risk_evaluation_high_score() {
         let provider = RangeComplianceProvider::new(Some("test_key".to_string()), None);
         let response = RiskResponse {
-            risk_score: 70, // Exactly at threshold
+            risk_score: 6, // High risk threshold (6-7)
             risk_level: "High risk".to_string(),
-            num_hops: Some(1),
+            num_hops: Some(2),
             malicious_addresses_found: vec![],
-            reasoning: "Bad actor".to_string(),
+            reasoning: "2 hops from malicious address".to_string(),
             attribution: None,
         };
         assert_eq!(
@@ -287,14 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn test_risk_evaluation_score_just_below_threshold() {
+    fn test_risk_evaluation_medium_risk_approved() {
         let provider = RangeComplianceProvider::new(Some("test_key".to_string()), None);
         let response = RiskResponse {
-            risk_score: 69, // Just below threshold
+            risk_score: 5, // Medium risk (4-5) - should be approved
             risk_level: "Medium risk".to_string(),
-            num_hops: Some(1),
+            num_hops: Some(3),
             malicious_addresses_found: vec![],
-            reasoning: "Borderline case".to_string(),
+            reasoning: "3 hops from malicious address".to_string(),
             attribution: None,
         };
         assert_eq!(
@@ -304,14 +316,14 @@ mod tests {
     }
 
     #[test]
-    fn test_risk_evaluation_low_score_but_high_risk_text() {
+    fn test_risk_evaluation_low_score_but_critical_risk_text() {
         let provider = RangeComplianceProvider::new(Some("test_key".to_string()), None);
         let response = RiskResponse {
-            risk_score: 10, // Low score but text says High (edge case safety)
-            risk_level: "High risk".to_string(),
-            num_hops: Some(1),
+            risk_score: 10, // Low score but text says CRITICAL (Range API actual format)
+            risk_level: "CRITICAL RISK (Directly malicious)".to_string(),
+            num_hops: Some(0),
             malicious_addresses_found: vec![],
-            reasoning: "Manual override".to_string(),
+            reasoning: "Address is directly flagged for malicious activity.".to_string(),
             attribution: None,
         };
         assert_eq!(
