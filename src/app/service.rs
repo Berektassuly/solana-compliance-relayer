@@ -89,12 +89,24 @@ impl AppService {
                     reason = %reason,
                     "Transfer blocked: recipient in internal blocklist"
                 );
-                // Persist with rejected status
+                // Persist with rejected status and store the reason
                 let mut transfer_request = self.db_client.submit_transfer(request).await?;
                 self.db_client
                     .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
                     .await?;
+                // Store the blocklist reason and mark as failed
+                self.db_client
+                    .update_blockchain_status(
+                        &transfer_request.id,
+                        BlockchainStatus::Failed,
+                        None,
+                        Some(&format!("Blocklist: {}", reason)),
+                        None,
+                    )
+                    .await?;
                 transfer_request.compliance_status = ComplianceStatus::Rejected;
+                transfer_request.blockchain_status = BlockchainStatus::Failed;
+                transfer_request.blockchain_last_error = Some(format!("Blocklist: {}", reason));
                 return Ok(transfer_request);
             }
 
@@ -105,12 +117,24 @@ impl AppService {
                     reason = %reason,
                     "Transfer blocked: sender in internal blocklist"
                 );
-                // Persist with rejected status
+                // Persist with rejected status and store the reason
                 let mut transfer_request = self.db_client.submit_transfer(request).await?;
                 self.db_client
                     .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
                     .await?;
+                // Store the blocklist reason and mark as failed
+                self.db_client
+                    .update_blockchain_status(
+                        &transfer_request.id,
+                        BlockchainStatus::Failed,
+                        None,
+                        Some(&format!("Blocklist: {}", reason)),
+                        None,
+                    )
+                    .await?;
                 transfer_request.compliance_status = ComplianceStatus::Rejected;
+                transfer_request.blockchain_status = BlockchainStatus::Failed;
+                transfer_request.blockchain_last_error = Some(format!("Blocklist: {}", reason));
                 return Ok(transfer_request);
             }
         }
