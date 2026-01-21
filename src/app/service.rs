@@ -10,6 +10,7 @@ use crate::domain::{
     HealthStatus, HeliusTransaction, PaginatedResponse, SubmitTransferRequest, TransferRequest,
     ValidationError,
 };
+use crate::infra::BlocklistManager;
 
 /// Maximum number of retry attempts for blockchain submission
 const MAX_RETRY_ATTEMPTS: i32 = 10;
@@ -22,6 +23,8 @@ pub struct AppService {
     db_client: Arc<dyn DatabaseClient>,
     blockchain_client: Arc<dyn BlockchainClient>,
     compliance_provider: Arc<dyn crate::domain::ComplianceProvider>,
+    /// Optional internal blocklist for fast local screening
+    blocklist: Option<Arc<BlocklistManager>>,
 }
 
 impl AppService {
@@ -35,6 +38,23 @@ impl AppService {
             db_client,
             blockchain_client,
             compliance_provider,
+            blocklist: None,
+        }
+    }
+
+    /// Create AppService with blocklist manager
+    #[must_use]
+    pub fn with_blocklist(
+        db_client: Arc<dyn DatabaseClient>,
+        blockchain_client: Arc<dyn BlockchainClient>,
+        compliance_provider: Arc<dyn crate::domain::ComplianceProvider>,
+        blocklist: Arc<BlocklistManager>,
+    ) -> Self {
+        Self {
+            db_client,
+            blockchain_client,
+            compliance_provider,
+            blocklist: Some(blocklist),
         }
     }
 
@@ -59,7 +79,43 @@ impl AppService {
 
         info!("Submitting new transfer request");
 
-        // Compliance check (synchronous - fast)
+        // Internal blocklist check (fast O(1) lookup - before external API call)
+        // Check both sender and recipient addresses
+        if let Some(ref blocklist) = self.blocklist {
+            // Check recipient first (more common case)
+            if let Some(reason) = blocklist.check_address(&request.to_address) {
+                warn!(
+                    address = %request.to_address,
+                    reason = %reason,
+                    "Transfer blocked: recipient in internal blocklist"
+                );
+                // Persist with rejected status
+                let mut transfer_request = self.db_client.submit_transfer(request).await?;
+                self.db_client
+                    .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
+                    .await?;
+                transfer_request.compliance_status = ComplianceStatus::Rejected;
+                return Ok(transfer_request);
+            }
+
+            // Check sender address
+            if let Some(reason) = blocklist.check_address(&request.from_address) {
+                warn!(
+                    address = %request.from_address,
+                    reason = %reason,
+                    "Transfer blocked: sender in internal blocklist"
+                );
+                // Persist with rejected status
+                let mut transfer_request = self.db_client.submit_transfer(request).await?;
+                self.db_client
+                    .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
+                    .await?;
+                transfer_request.compliance_status = ComplianceStatus::Rejected;
+                return Ok(transfer_request);
+            }
+        }
+
+        // External compliance check (synchronous - slower)
         let compliance_status = self.compliance_provider.check_compliance(request).await?;
         if compliance_status == crate::domain::ComplianceStatus::Rejected {
             warn!(from = %request.from_address, to = %request.to_address, "Transfer rejected by compliance provider");

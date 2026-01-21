@@ -4689,6 +4689,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "criterion",
+ "dashmap 6.1.0",
  "dotenvy",
  "ed25519-dalek",
  "governor 0.10.4",

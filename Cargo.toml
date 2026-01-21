@@ -50,6 +50,9 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 # Rate limiting  
 governor = "0.10.4"
 
+# Thread-safe concurrent HashMap for blocklist
+dashmap = "6"
+
 # Solana SDK
 solana-sdk = "3.0.0"
 solana-client = "3.1.6"

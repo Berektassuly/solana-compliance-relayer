@@ -12,7 +12,7 @@ use axum::{
     http::{Request, Response, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use governor::{
     Quota, RateLimiter,
@@ -32,6 +32,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::app::AppState;
 use crate::domain::{ErrorDetail, ErrorResponse, RateLimitResponse};
 
+use super::admin::{add_blocklist_handler, list_blocklist_handler, remove_blocklist_handler};
 use super::handlers::{
     ApiDoc, get_transfer_request_handler, health_check_handler, helius_webhook_handler,
     list_transfer_requests_handler, liveness_handler, readiness_handler, retry_blockchain_handler,
@@ -248,10 +249,16 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
     // Webhook routes (no rate limiting)
     let webhook_routes = Router::new().route("/helius", post(helius_webhook_handler));
 
+    // Admin routes for blocklist management
+    let admin_routes = Router::new()
+        .route("/blocklist", post(add_blocklist_handler).get(list_blocklist_handler))
+        .route("/blocklist/{address}", delete(remove_blocklist_handler));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
+        .nest("/admin", admin_routes)
         .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)
@@ -299,10 +306,20 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
     // Webhook routes (no rate limiting - webhooks need immediate delivery)
     let webhook_routes = Router::new().route("/helius", post(helius_webhook_handler));
 
+    // Admin routes for blocklist management (with rate limiting)
+    let admin_routes = Router::new()
+        .route("/blocklist", post(add_blocklist_handler).get(list_blocklist_handler))
+        .route("/blocklist/{address}", delete(remove_blocklist_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&rate_limit_state),
+            rate_limit_transfers_middleware,
+        ));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
+        .nest("/admin", admin_routes)
         .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)

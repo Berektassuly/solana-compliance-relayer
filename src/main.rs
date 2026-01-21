@@ -20,8 +20,8 @@ use solana_compliance_relayer::app::{
 use solana_compliance_relayer::infra::RpcBlockchainClient;
 use solana_compliance_relayer::infra::blockchain::{QuickNodeTokenApiClient, RpcProviderType};
 use solana_compliance_relayer::infra::{
-    PostgresClient, PostgresConfig, PrivacyHealthCheckConfig, PrivacyHealthCheckService,
-    signing_key_from_base58,
+    BlocklistManager, PostgresClient, PostgresConfig, PrivacyHealthCheckConfig,
+    PrivacyHealthCheckService, signing_key_from_base58,
 };
 
 /// Application configuration
@@ -189,6 +189,9 @@ async fn main() -> Result<()> {
     postgres_client.run_migrations().await?;
     info!("   ✓ Database connected and migrations applied");
 
+    // Get pool reference for blocklist manager (before moving postgres_client into Arc)
+    let db_pool = postgres_client.pool().clone();
+
     // Initialize blockchain client
     let blockchain_client =
         RpcBlockchainClient::with_defaults(&config.blockchain_rpc_url, config.signing_key)?;
@@ -205,8 +208,16 @@ async fn main() -> Result<()> {
         warn!("   ⚠ Compliance provider created (MOCK MODE - no RANGE_API_KEY)");
     }
 
+    // Initialize internal blocklist manager (uses db_pool directly)
+    let blocklist = BlocklistManager::new(db_pool).await?;
+    info!(
+        "   ✓ Blocklist manager initialized ({} entries loaded)",
+        blocklist.len()
+    );
+    let blocklist = Arc::new(blocklist);
+
     // Create application state
-    let mut app_state = AppState::with_helius_secret(
+    let app_state = AppState::with_helius_secret(
         Arc::new(postgres_client),
         Arc::new(blockchain_client),
         Arc::new(compliance_provider),
@@ -242,10 +253,13 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Add privacy service to app state if available
-    if let Some(ref privacy_svc) = privacy_service {
-        app_state = app_state.with_privacy_service(Arc::clone(privacy_svc));
-    }
+    // Add privacy service and blocklist to app state
+    let app_state = if let Some(ref privacy_svc) = privacy_service {
+        app_state.with_privacy_service(Arc::clone(privacy_svc))
+    } else {
+        app_state
+    };
+    let app_state = app_state.with_blocklist(blocklist);
 
     let app_state = Arc::new(app_state);
 
