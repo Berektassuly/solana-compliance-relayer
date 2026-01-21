@@ -251,7 +251,10 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
 
     // Admin routes for blocklist management
     let admin_routes = Router::new()
-        .route("/blocklist", post(add_blocklist_handler).get(list_blocklist_handler))
+        .route(
+            "/blocklist",
+            post(add_blocklist_handler).get(list_blocklist_handler),
+        )
         .route("/blocklist/{address}", delete(remove_blocklist_handler));
 
     Router::new()
@@ -308,7 +311,10 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
 
     // Admin routes for blocklist management (with rate limiting)
     let admin_routes = Router::new()
-        .route("/blocklist", post(add_blocklist_handler).get(list_blocklist_handler))
+        .route(
+            "/blocklist",
+            post(add_blocklist_handler).get(list_blocklist_handler),
+        )
         .route("/blocklist/{address}", delete(remove_blocklist_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&rate_limit_state),

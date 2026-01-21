@@ -82,12 +82,15 @@ pub async fn add_blocklist_handler(
     }
 
     // Get blocklist or return error if not configured
-    let blocklist = state.blocklist.as_ref().ok_or_else(|| {
-        AppError::NotSupported("Blocklist not configured".to_string())
-    })?;
+    let blocklist = state
+        .blocklist
+        .as_ref()
+        .ok_or_else(|| AppError::NotSupported("Blocklist not configured".to_string()))?;
 
     // Add to blocklist (persisted to database)
-    blocklist.add_address(payload.address.clone(), payload.reason.clone()).await?;
+    blocklist
+        .add_address(payload.address.clone(), payload.reason.clone())
+        .await?;
 
     warn!(
         address = %payload.address,
@@ -122,9 +125,10 @@ pub async fn remove_blocklist_handler(
     Path(address): Path<String>,
 ) -> Result<Json<BlocklistResponse>, AppError> {
     // Get blocklist or return error if not configured
-    let blocklist = state.blocklist.as_ref().ok_or_else(|| {
-        AppError::NotSupported("Blocklist not configured".to_string())
-    })?;
+    let blocklist = state
+        .blocklist
+        .as_ref()
+        .ok_or_else(|| AppError::NotSupported("Blocklist not configured".to_string()))?;
 
     // Remove from blocklist (persisted to database)
     if blocklist.remove_address(&address).await? {
@@ -137,9 +141,10 @@ pub async fn remove_blocklist_handler(
             message: format!("Address {} removed from blocklist", address),
         }))
     } else {
-        Err(AppError::Database(DatabaseError::NotFound(
-            format!("Address {} not found in blocklist", address),
-        )))
+        Err(AppError::Database(DatabaseError::NotFound(format!(
+            "Address {} not found in blocklist",
+            address
+        ))))
     }
 }
 
@@ -159,9 +164,10 @@ pub async fn list_blocklist_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListBlocklistResponse>, AppError> {
     // Get blocklist or return error if not configured
-    let blocklist = state.blocklist.as_ref().ok_or_else(|| {
-        AppError::NotSupported("Blocklist not configured".to_string())
-    })?;
+    let blocklist = state
+        .blocklist
+        .as_ref()
+        .ok_or_else(|| AppError::NotSupported("Blocklist not configured".to_string()))?;
 
     let entries: Vec<BlocklistEntryResponse> = blocklist
         .list_all()

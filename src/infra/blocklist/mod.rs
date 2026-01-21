@@ -57,7 +57,7 @@ impl BlocklistManager {
     /// Load all blocklist entries from the database into memory.
     async fn load_from_database(&self) -> Result<(), AppError> {
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT address, reason FROM blocklist ORDER BY created_at"
+            "SELECT address, reason FROM blocklist ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await

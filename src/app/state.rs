@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::domain::{BlockchainClient, ComplianceProvider, DatabaseClient};
-use crate::infra::privacy::PrivacyHealthCheckService;
 use crate::infra::BlocklistManager;
+use crate::infra::privacy::PrivacyHealthCheckService;
 
 use super::service::AppService;
 

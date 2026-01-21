@@ -119,10 +119,12 @@ src/
 │   └── worker.rs    # Background retry worker with exponential backoff
 ├── api/             # HTTP interface (Primary Adapter)
 │   ├── handlers.rs  # Axum route handlers with OpenAPI docs
+│   ├── admin.rs     # Admin API for blocklist management
 │   └── router.rs    # Rate limiting, CORS, middleware
 └── infra/           # External integrations (Secondary Adapters)
     ├── database/    # PostgreSQL via SQLx (compile-time checked)
     ├── blockchain/  # Solana via Helius/QuickNode/Standard RPC
+    ├── blocklist/   # Internal blocklist with DashMap + PostgreSQL
     └── compliance/  # Range Protocol integration
 ```
 
@@ -188,10 +190,11 @@ sequenceDiagram
 |-----------|-------------|
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
-| **Automated AML/Compliance Screening** | Range Protocol integration with risk score evaluation (≥70 = rejected) |
+| **Internal Blocklist Manager** | Thread-safe DashMap cache with PostgreSQL persistence for fast local address screening |
+| **Automated AML/Compliance Screening** | Range Protocol integration with risk score evaluation (>=70 = rejected) |
 | **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
 | **Resilient Background Worker** | Exponential backoff retries (up to 10 attempts, max 5-minute delay) |
-| **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` → `confirmed` |
+| **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` -> `confirmed` |
 | **Provider Strategy Pattern** | Auto-detects Helius/QuickNode for premium features (priority fees, DAS) |
 | **Rate Limiting** | Governor-based middleware with configurable RPS and burst limits |
 | **OpenAPI Documentation** | Auto-generated Swagger UI at `/swagger-ui` |
@@ -270,6 +273,68 @@ SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
 # Standard RPC (development only)
 SOLANA_RPC_URL=https://api.devnet.solana.com
 ```
+
+---
+
+## Internal Blocklist Manager
+
+The relayer includes a high-performance internal blocklist that acts as a "hot cache" for screening malicious addresses **before** querying external compliance providers like Range Protocol.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Address Screening Pipeline                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────────┐    ┌──────────────────┐     ┌───────────────┐ │
+│  │  Internal        │    │  Range Protocol  │     │  Blockchain   │ │
+│  │  Blocklist       │───▶│  Risk API        │───▶│  Submission   │ │
+│  │  (DashMap O(1))  │    │  (Network call)  │     │               │ │
+│  └──────────────────┘    └──────────────────┘     └───────────────┘ │
+│         │                         │                                 │
+│         ▼                         ▼                                 │
+│    Instant reject           Risk score ≥70                          │
+│    (no API call)            = Rejected                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Thread-Safe** | Uses `dashmap::DashMap` for lock-free concurrent access |
+| **Persistent** | All changes are persisted to PostgreSQL and survive restarts |
+| **O(1) Lookups** | In-memory cache provides instant address checks |
+| **Admin API** | Real-time management via HTTP endpoints |
+| **Dual Check** | Both sender and recipient addresses are screened |
+
+### Admin API Usage
+
+```bash
+# Add an address to the blocklist
+curl -X POST http://localhost:3000/admin/blocklist \
+  -H "Content-Type: application/json" \
+  -d '{
+    "address": "SuspiciousWallet123...",
+    "reason": "Suspected phishing activity"
+  }'
+
+# List all blocklisted addresses
+curl http://localhost:3000/admin/blocklist
+
+# Remove an address from the blocklist
+curl -X DELETE http://localhost:3000/admin/blocklist/SuspiciousWallet123...
+```
+
+### Pre-Seeded Blocklist
+
+The system initializes with a seeded blocklist entry for demonstration:
+
+| Address | Reason |
+|---------|--------|
+| `4oS78GPe66RqBduuAeiMFANf27FpmgXNwokZ3ocN4z1B` | Internal Security Alert: Address linked to Phishing Scam (Flagged manually) |
 
 ---
 
@@ -395,6 +460,14 @@ ENABLE_BACKGROUND_WORKER=true
 | `GET` | `/health` | Detailed health check |
 | `GET` | `/health/live` | Kubernetes liveness probe |
 | `GET` | `/health/ready` | Kubernetes readiness probe |
+
+### Admin Endpoints (Blocklist Management)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/admin/blocklist` | Add address to internal blocklist |
+| `GET` | `/admin/blocklist` | List all blocklisted addresses |
+| `DELETE` | `/admin/blocklist/{address}` | Remove address from blocklist |
 
 ### Interactive Documentation
 
@@ -537,12 +610,15 @@ cargo tarpaulin --out Html
 | 5 | Helius webhook integration | Complete |
 | 6 | Next.js frontend with real-time monitoring | Complete |
 | 7 | Token-2022 confidential transfer support | Complete |
+| 8 | Internal Blocklist Manager with admin API | Complete |
 
 ---
 
 ## Contact
 
 **Mukhammedali Berektassuly**
+
+> This project was built with 💜 by a 17-year-old developer from Kazakhstan
 
 - Website: [berektassuly.com](https://berektassuly.com)
 - Email: [mukhammedali@berektassuly.com](mailto:mukhammedali@berektassuly.com)
