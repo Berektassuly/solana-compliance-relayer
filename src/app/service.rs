@@ -208,26 +208,74 @@ impl AppService {
                 AppError::Database(crate::domain::DatabaseError::NotFound(id.to_string()))
             })?;
 
-        // SECURITY: Block retry if compliance was rejected
+        // SECURITY: Block retry if compliance was rejected (unless it was a blocklist rejection and address is now clear)
         if transfer_request.compliance_status == ComplianceStatus::Rejected {
-            warn!(
-                id = %id,
-                "Retry blocked: compliance status is rejected"
-            );
-            return Err(AppError::Validation(ValidationError::InvalidField {
-                field: "compliance_status".to_string(),
-                message: "Cannot retry a rejected transfer".to_string(),
-            }));
+            // Check if this was a blocklist rejection
+            let was_blocklist_rejection = transfer_request
+                .blockchain_last_error
+                .as_ref()
+                .map(|e| e.starts_with("Blocklist:"))
+                .unwrap_or(false);
+
+            if was_blocklist_rejection {
+                // Re-check blocklist - if address is now clear, allow retry
+                let mut is_still_blocked = false;
+
+                if let Some(ref blocklist) = self.blocklist {
+                    if blocklist
+                        .check_address(&transfer_request.to_address)
+                        .is_some()
+                    {
+                        is_still_blocked = true;
+                    }
+                    if blocklist
+                        .check_address(&transfer_request.from_address)
+                        .is_some()
+                    {
+                        is_still_blocked = true;
+                    }
+                }
+
+                if is_still_blocked {
+                    warn!(
+                        id = %id,
+                        "Retry blocked: address still in blocklist"
+                    );
+                    return Err(AppError::Validation(ValidationError::InvalidField {
+                        field: "compliance_status".to_string(),
+                        message: "Address is still blocklisted".to_string(),
+                    }));
+                }
+
+                // Address is now clear - update compliance status to approved
+                info!(
+                    id = %id,
+                    "Blocklist cleared: updating compliance status to approved for retry"
+                );
+                self.db_client
+                    .update_compliance_status(id, ComplianceStatus::Approved)
+                    .await?;
+            } else {
+                // Non-blocklist rejection - cannot retry
+                warn!(
+                    id = %id,
+                    "Retry blocked: compliance status is rejected (not blocklist)"
+                );
+                return Err(AppError::Validation(ValidationError::InvalidField {
+                    field: "compliance_status".to_string(),
+                    message: "Cannot retry a rejected transfer".to_string(),
+                }));
+            }
         }
 
-        // SECURITY: Re-check blocklist before allowing retry
+        // SECURITY: Re-check blocklist before allowing retry (for non-rejected transfers)
         if let Some(ref blocklist) = self.blocklist {
             if let Some(reason) = blocklist.check_address(&transfer_request.to_address) {
                 warn!(
                     id = %id,
                     address = %transfer_request.to_address,
                     reason = %reason,
-                    "Retry blocked: recipient still in blocklist"
+                    "Retry blocked: recipient in blocklist"
                 );
                 return Err(AppError::Validation(ValidationError::InvalidField {
                     field: "to_address".to_string(),
@@ -239,7 +287,7 @@ impl AppService {
                     id = %id,
                     address = %transfer_request.from_address,
                     reason = %reason,
-                    "Retry blocked: sender still in blocklist"
+                    "Retry blocked: sender in blocklist"
                 );
                 return Err(AppError::Validation(ValidationError::InvalidField {
                     field: "from_address".to_string(),
