@@ -148,16 +148,23 @@ sequenceDiagram
     WASM->>API: POST /transfer-requests (Signed Payload)
     
     API->>API: Verify Ed25519 Signature
-    API->>Range: check_compliance(address)
+    API->>API: Check Internal Blocklist (DashMap)
     
-    alt Address Sanctioned/High Risk
-        Range-->>API: Rejected (riskScore ≥ 70)
-        API->>DB: Persist (compliance_status: rejected)
-        API-->>User: 200 OK {status: "rejected"}
-    else Address Clean
-        Range-->>API: Approved (riskScore < 70)
-        API->>DB: Persist (compliance_status: approved, blockchain_status: pending_submission)
-        API-->>User: 200 OK {status: "pending_submission"}
+    alt Address in Internal Blocklist
+        API->>DB: Persist (status: rejected, error: "Blocklist: reason")
+        API-->>User: 200 OK {blockchain_status: "failed"}
+    else Address Not Blocked
+        API->>Range: check_compliance(address)
+        alt Address High Risk (riskScore >= 6)
+            Range-->>API: Rejected (CRITICAL/HIGH risk)
+            API->>DB: Persist (compliance_status: rejected)
+            API->>API: Auto-add to Internal Blocklist
+            API-->>User: 200 OK {blockchain_status: "failed"}
+        else Address Clean
+            Range-->>API: Approved (riskScore < 6)
+            API->>DB: Persist (compliance_status: approved, blockchain_status: pending_submission)
+            API-->>User: 200 OK {status: "pending_submission"}
+        end
     end
 
     loop Every 10 seconds
@@ -191,7 +198,7 @@ sequenceDiagram
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
 | **Internal Blocklist Manager** | Thread-safe DashMap cache with PostgreSQL persistence for fast local address screening |
-| **Automated AML/Compliance Screening** | Range Protocol integration with risk score evaluation (>=70 = rejected) |
+| **Automated AML/Compliance Screening** | Range Protocol Risk API with 1-10 score scale (>=6 = High risk = rejected) |
 | **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
 | **Resilient Background Worker** | Exponential backoff retries (up to 10 attempts, max 5-minute delay) |
 | **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` -> `confirmed` |
