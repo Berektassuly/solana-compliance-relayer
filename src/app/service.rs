@@ -208,6 +208,46 @@ impl AppService {
                 AppError::Database(crate::domain::DatabaseError::NotFound(id.to_string()))
             })?;
 
+        // SECURITY: Block retry if compliance was rejected
+        if transfer_request.compliance_status == ComplianceStatus::Rejected {
+            warn!(
+                id = %id,
+                "Retry blocked: compliance status is rejected"
+            );
+            return Err(AppError::Validation(ValidationError::InvalidField {
+                field: "compliance_status".to_string(),
+                message: "Cannot retry a rejected transfer".to_string(),
+            }));
+        }
+
+        // SECURITY: Re-check blocklist before allowing retry
+        if let Some(ref blocklist) = self.blocklist {
+            if let Some(reason) = blocklist.check_address(&transfer_request.to_address) {
+                warn!(
+                    id = %id,
+                    address = %transfer_request.to_address,
+                    reason = %reason,
+                    "Retry blocked: recipient still in blocklist"
+                );
+                return Err(AppError::Validation(ValidationError::InvalidField {
+                    field: "to_address".to_string(),
+                    message: format!("Recipient address is blocklisted: {}", reason),
+                }));
+            }
+            if let Some(reason) = blocklist.check_address(&transfer_request.from_address) {
+                warn!(
+                    id = %id,
+                    address = %transfer_request.from_address,
+                    reason = %reason,
+                    "Retry blocked: sender still in blocklist"
+                );
+                return Err(AppError::Validation(ValidationError::InvalidField {
+                    field: "from_address".to_string(),
+                    message: format!("Sender address is blocklisted: {}", reason),
+                }));
+            }
+        }
+
         if transfer_request.blockchain_status != BlockchainStatus::PendingSubmission
             && transfer_request.blockchain_status != BlockchainStatus::Failed
         {
