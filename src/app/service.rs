@@ -141,25 +141,58 @@ impl AppService {
 
         // External compliance check (synchronous - slower)
         let compliance_status = self.compliance_provider.check_compliance(request).await?;
+
+        // If rejected by Range, persist with Failed status AND auto-add to blocklist
         if compliance_status == crate::domain::ComplianceStatus::Rejected {
             warn!(from = %request.from_address, to = %request.to_address, "Transfer rejected by compliance provider");
-        }
 
-        // Persist to database (single source of truth)
-        let mut transfer_request = self.db_client.submit_transfer(request).await?;
+            let rejection_reason = "Range Protocol: High-risk address detected (CRITICAL RISK)";
 
-        // Update compliance status
-        if compliance_status != crate::domain::ComplianceStatus::Pending {
+            // Persist transfer with rejected status
+            let mut transfer_request = self.db_client.submit_transfer(request).await?;
             self.db_client
-                .update_compliance_status(&transfer_request.id, compliance_status)
+                .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
                 .await?;
-        }
-        transfer_request.compliance_status = compliance_status;
 
-        // If rejected, return early - no blockchain submission needed
-        if compliance_status == crate::domain::ComplianceStatus::Rejected {
+            // Mark as Failed with reason (same pattern as blocklist)
+            self.db_client
+                .update_blockchain_status(
+                    &transfer_request.id,
+                    BlockchainStatus::Failed,
+                    None,
+                    Some(rejection_reason),
+                    None,
+                )
+                .await?;
+
+            // Auto-add to internal blocklist to avoid future API calls
+            if let Some(ref blocklist) = self.blocklist {
+                if blocklist.check_address(&request.to_address).is_none() {
+                    info!(
+                        address = %request.to_address,
+                        "Auto-adding high-risk address to internal blocklist"
+                    );
+                    let _ = blocklist
+                        .add_address(
+                            request.to_address.clone(),
+                            "Auto-blocked: Range Protocol CRITICAL RISK".to_string(),
+                        )
+                        .await;
+                }
+            }
+
+            transfer_request.compliance_status = ComplianceStatus::Rejected;
+            transfer_request.blockchain_status = BlockchainStatus::Failed;
+            transfer_request.blockchain_last_error = Some(rejection_reason.to_string());
             return Ok(transfer_request);
         }
+
+        // Compliance passed - persist to database (single source of truth)
+        let mut transfer_request = self.db_client.submit_transfer(request).await?;
+        self.db_client
+            .update_compliance_status(&transfer_request.id, ComplianceStatus::Approved)
+            .await?;
+        transfer_request.compliance_status = ComplianceStatus::Approved;
 
         // Queue for background processing (Outbox Pattern: no blockchain call here!)
         self.db_client
