@@ -170,6 +170,30 @@ impl RiskService {
             warn!(error = ?e, "Failed to cache risk profile, continuing without cache");
         }
 
+        // Step 4b: Auto-add high-risk addresses to blocklist
+        // This prevents repeated API calls for known bad actors
+        if let Some(score) = risk_score {
+            use crate::infra::compliance::range::DEFAULT_RISK_THRESHOLD;
+            if score >= DEFAULT_RISK_THRESHOLD
+                && let Some(blocklist) = &self.blocklist
+                && blocklist.check_address(address).is_none()
+            {
+                let reason = format!(
+                    "Auto-blocked: Range Protocol {} (score: {})",
+                    risk_level.as_deref().unwrap_or("High Risk"),
+                    score
+                );
+                info!(
+                    address = %address,
+                    risk_score = %score,
+                    "Auto-adding high-risk address to internal blocklist"
+                );
+                if let Err(e) = blocklist.add_address(address.to_string(), reason).await {
+                    warn!(error = ?e, "Failed to add address to blocklist");
+                }
+            }
+        }
+
         // Step 5: Response
         Ok(RiskCheckResult::Analyzed {
             address: address.to_string(),
