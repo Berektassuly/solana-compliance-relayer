@@ -155,13 +155,13 @@ sequenceDiagram
         API-->>User: 200 OK {blockchain_status: "failed"}
     else Address Not Blocked
         API->>Range: check_compliance(address)
-        alt Address High Risk (riskScore >= 6)
+        alt Address High Risk (score >= threshold)
             Range-->>API: Rejected (CRITICAL/HIGH risk)
             API->>DB: Persist (compliance_status: rejected)
             API->>API: Auto-add to Internal Blocklist
             API-->>User: 200 OK {blockchain_status: "failed"}
         else Address Clean
-            Range-->>API: Approved (riskScore < 6)
+            Range-->>API: Approved (riskScore < threshold)
             API->>DB: Persist (compliance_status: approved, blockchain_status: pending_submission)
             API-->>User: 200 OK {status: "pending_submission"}
         end
@@ -198,7 +198,7 @@ sequenceDiagram
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
 | **Internal Blocklist Manager** | Thread-safe DashMap cache with PostgreSQL persistence for fast local address screening |
-| **Automated AML/Compliance Screening** | Range Protocol Risk API with 1-10 score scale (>=6 = High risk = rejected) |
+| **Automated AML/Compliance Screening** | Range Protocol Risk API with configurable threshold (default: 6 = High Risk) |
 | **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
 | **Resilient Background Worker** | Exponential backoff retries (up to 10 attempts, max 5-minute delay) |
 | **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` -> `confirmed` |
@@ -418,15 +418,16 @@ Create a `.env` file in the project root. See `.env.example` for all options.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | ✅ | PostgreSQL connection string |
-| `SOLANA_RPC_URL` | ✅ | Solana RPC endpoint (Helius recommended) |
-| `ISSUER_PRIVATE_KEY` | ✅ | Base58 relayer wallet private key |
-| `HELIUS_API_KEY` | ⚡ | Enables priority fees and DAS checks (auto-detected from RPC URL) |
-| `HELIUS_WEBHOOK_SECRET` | ⚡ | Authorization header for webhook validation |
-| `RANGE_API_KEY` | ⚠️ | Range Protocol API key (mock mode if absent) |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius recommended) |
+| `ISSUER_PRIVATE_KEY` | Yes | Base58 relayer wallet private key |
+| `HELIUS_API_KEY` | Recommended | Enables priority fees and DAS checks (auto-detected from RPC URL) |
+| `HELIUS_WEBHOOK_SECRET` | Recommended | Authorization header for webhook validation |
+| `RANGE_API_KEY` | No | Range Protocol API key (mock mode if absent) |
+| `RANGE_RISK_THRESHOLD` | No | Risk score threshold (1-10, default: 6 = High Risk) |
 
-> ⚡ = Highly recommended for production  
-> ⚠️ = Falls back to mock mode if not set
+> **Recommended** = Highly recommended for production  
+> **No** = Falls back to default/mock mode if not set
 
 ### Example Production Configuration
 
@@ -441,6 +442,7 @@ HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 
 # Compliance
 RANGE_API_KEY=YOUR_RANGE_KEY
+RANGE_RISK_THRESHOLD=6  # 1-10, higher = more permissive (default: 6 = High Risk)
 
 # Server
 HOST=0.0.0.0

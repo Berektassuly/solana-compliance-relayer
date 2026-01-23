@@ -123,19 +123,24 @@ fn mock_check(&self, to_address: &str) -> ComplianceStatus {
 ```env
 RANGE_API_KEY=your-range-protocol-api-key
 RANGE_API_URL=https://api.range.org/v1  # Optional, uses default if not set
+RANGE_RISK_THRESHOLD=6  # Optional, 1-10 (default: 6 = High Risk)
 ```
 
 #### Risk Score Evaluation
 
-The system evaluates risk responses using the following logic:
+The system evaluates risk responses using a **configurable threshold** (default: 6):
 
 ```rust
 fn evaluate_risk(&self, response: &RiskResponse) -> ComplianceStatus {
-    let is_high_risk = response.risk_score >= 70
-        || response.risk_level.contains("High")
-        || response.risk_level.contains("Severe");
-
-    if is_high_risk {
+    // Primary check: numeric risk score against configured threshold
+    let exceeds_threshold = response.risk_score >= self.risk_threshold;
+    
+    // Text-based checks are conditional on the threshold level
+    let text_indicates_risk = (self.risk_threshold <= 6 && risk_level_lower.contains("high"))
+        || (self.risk_threshold <= 8 && risk_level_lower.contains("extremely"))
+        || risk_level_lower.contains("critical");
+    
+    if exceeds_threshold || text_indicates_risk {
         ComplianceStatus::Rejected
     } else {
         ComplianceStatus::Approved
@@ -143,11 +148,14 @@ fn evaluate_risk(&self, response: &RiskResponse) -> ComplianceStatus {
 }
 ```
 
-| Risk Score | Risk Level | Result |
-|------------|------------|--------|
-| 0-69 | Any | Approved |
-| 70+ | Any | Rejected |
-| Any | Contains "High" or "Severe" | Rejected |
+| Risk Score | Risk Level | Default (threshold=6) | Strict (threshold=2) | Relaxed (threshold=8) |
+|------------|------------|----------------------|---------------------|----------------------|
+| 1 | Very Low | Approved | Approved | Approved |
+| 2-3 | Low | Approved | Rejected | Approved |
+| 4-5 | Medium | Approved | Rejected | Approved |
+| 6-7 | High | Rejected | Rejected | Approved |
+| 8-9 | Extremely High | Rejected | Rejected | Rejected |
+| 10 | Critical | Rejected | Rejected | Rejected |
 
 > **NOTE**: On API errors, the system defaults to **Rejected** for safety. This prevents potentially sanctioned transactions from being processed during service degradation.
 
@@ -631,6 +639,7 @@ impl Default for PostgresConfig {
 | `SOLANA_RPC_URL` | Yes | `devnet` | Solana RPC endpoint |
 | `ISSUER_PRIVATE_KEY` | Yes | - | Base58 relayer wallet key |
 | `RANGE_API_KEY` | No | - | Range Protocol key (mock if absent) |
+| `RANGE_RISK_THRESHOLD` | No | `6` | Risk threshold (1-10, configurable) |
 | `HELIUS_WEBHOOK_SECRET` | No | - | Webhook auth header value |
 | `ENABLE_RATE_LIMITING` | No | `false` | Governor middleware toggle |
 | `ENABLE_BACKGROUND_WORKER` | No | `true` | Worker process toggle |
