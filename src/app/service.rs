@@ -166,19 +166,19 @@ impl AppService {
                 .await?;
 
             // Auto-add to internal blocklist to avoid future API calls
-            if let Some(ref blocklist) = self.blocklist {
-                if blocklist.check_address(&request.to_address).is_none() {
-                    info!(
-                        address = %request.to_address,
-                        "Auto-adding high-risk address to internal blocklist"
-                    );
-                    let _ = blocklist
-                        .add_address(
-                            request.to_address.clone(),
-                            "Auto-blocked: Range Protocol CRITICAL RISK".to_string(),
-                        )
-                        .await;
-                }
+            if let Some(ref blocklist) = self.blocklist
+                && blocklist.check_address(&request.to_address).is_none()
+            {
+                info!(
+                    address = %request.to_address,
+                    "Auto-adding high-risk address to internal blocklist"
+                );
+                let _ = blocklist
+                    .add_address(
+                        request.to_address.clone(),
+                        "Auto-blocked: Range Protocol CRITICAL RISK".to_string(),
+                    )
+                    .await;
             }
 
             transfer_request.compliance_status = ComplianceStatus::Rejected;

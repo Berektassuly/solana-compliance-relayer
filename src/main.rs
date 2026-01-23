@@ -19,6 +19,7 @@ use solana_compliance_relayer::app::{
 };
 use solana_compliance_relayer::infra::RpcBlockchainClient;
 use solana_compliance_relayer::infra::blockchain::{QuickNodeTokenApiClient, RpcProviderType};
+use solana_compliance_relayer::infra::compliance::range::DEFAULT_RISK_THRESHOLD;
 use solana_compliance_relayer::infra::{
     BlocklistManager, PostgresClient, PostgresConfig, PrivacyHealthCheckConfig,
     PrivacyHealthCheckService, signing_key_from_base58,
@@ -39,6 +40,8 @@ struct Config {
     range_api_key: Option<String>,
     /// Range Protocol API base URL (optional - uses default if not set)
     range_api_url: Option<String>,
+    /// Risk threshold for Range compliance (default: 6 = High Risk)
+    range_risk_threshold: i32,
     /// Helius webhook secret for authentication (optional)
     helius_webhook_secret: Option<String>,
     /// Enable privacy health checks for confidential transfers
@@ -72,6 +75,12 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
 
+        // Range risk threshold configuration
+        let range_risk_threshold = env::var("RANGE_RISK_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(DEFAULT_RISK_THRESHOLD);
+
         let rate_limit_config = RateLimitConfig::from_env();
 
         // Privacy health check configuration
@@ -97,6 +106,7 @@ impl Config {
             worker_config,
             range_api_key,
             range_api_url,
+            range_risk_threshold,
             helius_webhook_secret,
             enable_privacy_checks,
         })
@@ -197,13 +207,14 @@ async fn main() -> Result<()> {
         RpcBlockchainClient::with_defaults(&config.blockchain_rpc_url, config.signing_key)?;
     info!("   ✓ Blockchain client created");
 
-    // Initialize compliance provider
     let compliance_provider = solana_compliance_relayer::infra::RangeComplianceProvider::new(
         config.range_api_key.clone(),
         config.range_api_url.clone(),
+        Some(config.range_risk_threshold),
     );
     if config.range_api_key.is_some() {
         info!("   ✓ Compliance provider created (Range Protocol API)");
+        info!("   ✓ Risk threshold: {}", config.range_risk_threshold);
     } else {
         warn!("   ⚠ Compliance provider created (MOCK MODE - no RANGE_API_KEY)");
     }
