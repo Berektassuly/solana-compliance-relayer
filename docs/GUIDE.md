@@ -19,6 +19,7 @@ This document provides a comprehensive technical manual for developers and opera
    - [Confidential Transfer Tests](#confidential-transfer-tests)
    - [Retry Logic Tests](#retry-logic-tests)
    - [Compliance Failure Simulation](#compliance-failure-simulation)
+   - [Pre-Flight Risk Check Tests](#pre-flight-risk-check-tests)
 4. [Transaction Lifecycle and Database Operations](#4-transaction-lifecycle-and-database-operations)
    - [State Machine Deep Dive](#state-machine-deep-dive)
    - [Database Inspection Queries](#database-inspection-queries)
@@ -409,6 +410,74 @@ ORDER BY created_at DESC LIMIT 5;
 
 ---
 
+### Pre-Flight Risk Check Tests
+
+The `/risk-check` endpoint performs pre-flight compliance screening without initiating a transaction.
+
+#### Check a Clean Address
+
+```bash
+curl -X POST 'http://localhost:3000/risk-check' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "address": "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF"
+  }'
+```
+
+**Expected Response (Analyzed)**:
+
+```json
+{
+  "status": "analyzed",
+  "address": "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF",
+  "risk_score": 2,
+  "risk_level": "Low risk",
+  "reasoning": "3 hops from nearest flagged address",
+  "has_sanctioned_assets": false,
+  "helius_assets_checked": true,
+  "from_cache": false,
+  "checked_at": "2026-01-23T12:00:00Z"
+}
+```
+
+#### Check a Blocked Address
+
+```bash
+curl -X POST 'http://localhost:3000/risk-check' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "address": "4oS78GPe66RqBduuAeiMFANf27FpmgXNwokZ3ocN4z1B"
+  }'
+```
+
+**Expected Response (Blocked)**:
+
+```json
+{
+  "status": "blocked",
+  "address": "4oS78GPe66RqBduuAeiMFANf27FpmgXNwokZ3ocN4z1B",
+  "reason": "Internal Security Alert: Address linked to Phishing Scam"
+}
+```
+
+#### Verify Cache Behavior
+
+Call the same clean address twice:
+
+1. First call: `"from_cache": false`
+2. Second call (within 1 hour): `"from_cache": true`
+
+#### Response Field Reference
+
+| Field | Description |
+|-------|-------------|
+| `status` | `blocked` (in blocklist) or `analyzed` (checked external APIs) |
+| `helius_assets_checked` | `true` if DAS check was performed, `false` if skipped (non-Helius RPC) |
+| `has_sanctioned_assets` | Only meaningful when `helius_assets_checked: true` |
+| `from_cache` | `true` if result came from database cache (< 1 hour old) |
+
+---
+
 ## 4. Transaction Lifecycle and Database Operations
 
 ### State Machine Deep Dive
@@ -652,6 +721,7 @@ impl Default for PostgresConfig {
 |---------|------|
 | API Handlers | `src/api/handlers.rs` |
 | Business Logic | `src/app/service.rs` |
+| Risk Check Service | `src/app/risk_service.rs` |
 | Background Worker | `src/app/worker.rs` |
 | Database Queries | `src/infra/database/postgres.rs` |
 | Blockchain Client | `src/infra/blockchain/solana.rs` |

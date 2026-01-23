@@ -197,6 +197,7 @@ sequenceDiagram
 |-----------|-------------|
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
+| **Pre-Flight Risk Check** | `POST /risk-check` aggregates blocklist, Range Protocol, and Helius DAS data with 1-hour caching |
 | **Internal Blocklist Manager** | Thread-safe DashMap cache with PostgreSQL persistence for fast local address screening |
 | **Automated AML/Compliance Screening** | Range Protocol Risk API with configurable threshold (default: 6 = High Risk) |
 | **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
@@ -478,6 +479,12 @@ ENABLE_BACKGROUND_WORKER=true
 | `GET` | `/admin/blocklist` | List all blocklisted addresses |
 | `DELETE` | `/admin/blocklist/{address}` | Remove address from blocklist |
 
+### Compliance Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/risk-check` | Pre-flight wallet risk check (aggregates blocklist, Range, Helius DAS) |
+
 ### Interactive Documentation
 
 - **Swagger UI:** `http://localhost:3000/swagger-ui`
@@ -620,6 +627,7 @@ cargo tarpaulin --out Html
 | 6 | Next.js frontend with real-time monitoring | Complete |
 | 7 | Token-2022 confidential transfer support | Complete |
 | 8 | Internal Blocklist Manager with admin API | Complete |
+| 9 | Pre-Flight Risk Check with persistent caching | Complete |
 
 ---
 
