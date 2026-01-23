@@ -6,6 +6,7 @@ use crate::domain::{BlockchainClient, ComplianceProvider, DatabaseClient};
 use crate::infra::BlocklistManager;
 use crate::infra::privacy::PrivacyHealthCheckService;
 
+use super::risk_service::RiskService;
 use super::service::AppService;
 
 /// Shared application state
@@ -21,6 +22,8 @@ pub struct AppState {
     pub privacy_service: Option<Arc<PrivacyHealthCheckService>>,
     /// Internal blocklist manager for local address screening
     pub blocklist: Option<Arc<BlocklistManager>>,
+    /// Risk check service for pre-flight compliance screening
+    pub risk_service: Option<Arc<RiskService>>,
 }
 
 impl AppState {
@@ -55,6 +58,7 @@ impl AppState {
             helius_webhook_secret,
             privacy_service: None,
             blocklist: None,
+            risk_service: None,
         }
     }
 
@@ -77,6 +81,13 @@ impl AppState {
             Arc::clone(&blocklist),
         ));
         self.blocklist = Some(blocklist);
+        self
+    }
+
+    /// Add risk service to the application state (builder pattern)
+    #[must_use]
+    pub fn with_risk_service(mut self, risk_service: Arc<RiskService>) -> Self {
+        self.risk_service = Some(risk_service);
         self
     }
 }

@@ -36,7 +36,7 @@ use super::admin::{add_blocklist_handler, list_blocklist_handler, remove_blockli
 use super::handlers::{
     ApiDoc, get_transfer_request_handler, health_check_handler, helius_webhook_handler,
     list_transfer_requests_handler, liveness_handler, readiness_handler, retry_blockchain_handler,
-    submit_transfer_handler,
+    risk_check_handler, submit_transfer_handler,
 };
 
 /// Rate limiter configuration
@@ -257,11 +257,15 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         )
         .route("/blocklist/{address}", delete(remove_blocklist_handler));
 
+    // Compliance routes
+    let compliance_routes = Router::new().route("/", post(risk_check_handler));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .nest("/admin", admin_routes)
+        .nest("/risk-check", compliance_routes)
         .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)
@@ -321,11 +325,21 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
             rate_limit_transfers_middleware,
         ));
 
+    // Compliance routes (with rate limiting)
+    let compliance_routes =
+        Router::new()
+            .route("/", post(risk_check_handler))
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&rate_limit_state),
+                rate_limit_transfers_middleware,
+            ));
+
     Router::new()
         .nest("/transfer-requests", transfer_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .nest("/admin", admin_routes)
+        .nest("/risk-check", compliance_routes)
         .layer(create_cors_layer())
         .layer(middleware)
         .with_state(app_state)

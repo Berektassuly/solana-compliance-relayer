@@ -1,3 +1,3 @@
 pub mod range;
 
-pub use range::RangeComplianceProvider;
+pub use range::{RangeComplianceProvider, RiskResponse};

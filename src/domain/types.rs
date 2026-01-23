@@ -603,6 +603,79 @@ pub struct RateLimitResponse {
     pub retry_after: u64,
 }
 
+// ============================================================================
+// Risk Check Types (Pre-flight Compliance Screening)
+// ============================================================================
+
+/// Request to check wallet risk status
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RiskCheckRequest {
+    /// Wallet address to check (Base58 Solana address)
+    #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
+    pub address: String,
+}
+
+/// Cached wallet risk profile from database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletRiskProfile {
+    pub address: String,
+    pub risk_score: Option<i32>,
+    pub risk_level: Option<String>,
+    pub reasoning: Option<String>,
+    pub has_sanctioned_assets: bool,
+    pub helius_assets_checked: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Result of a wallet risk check (polymorphic response)
+///
+/// This enum differentiates between:
+/// - **Blocked**: Wallet found in internal blocklist (no external API calls made)
+/// - **Analyzed**: Wallet checked against Range Protocol and Helius DAS
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RiskCheckResult {
+    /// Wallet is blocked by internal blocklist.
+    /// No risk score is returned as we skip external checks to save resources.
+    Blocked {
+        /// The wallet address that was checked
+        #[schema(example = "4oS78GPe66RqBduuAeiMFANf27FpmgXNwokZ3ocN4z1B")]
+        address: String,
+        /// Reason for blocking from the internal blocklist
+        #[schema(example = "Internal Security Alert: Address linked to Phishing Scam")]
+        reason: String,
+    },
+    /// Wallet was analyzed (clean or warning level).
+    /// Contains aggregated data from Range Protocol and Helius DAS.
+    Analyzed {
+        /// The wallet address that was checked
+        #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
+        address: String,
+        /// Risk score from Range Protocol (1-10, higher = more risky)
+        #[schema(example = 2)]
+        risk_score: i32,
+        /// Risk level description from Range Protocol
+        #[schema(example = "Low risk")]
+        risk_level: String,
+        /// Reasoning from Range Protocol
+        #[schema(example = "3 hops from nearest flagged address")]
+        reasoning: String,
+        /// Whether the wallet holds sanctioned NFTs/assets (from Helius DAS)
+        #[schema(example = false)]
+        has_sanctioned_assets: bool,
+        /// Whether Helius DAS check was actually performed.
+        /// If false, `has_sanctioned_assets` is a default value (check skipped).
+        #[schema(example = true)]
+        helius_assets_checked: bool,
+        /// Whether this result came from cache
+        #[schema(example = false)]
+        from_cache: bool,
+        /// Timestamp when the risk check was performed
+        checked_at: DateTime<Utc>,
+    },
+}
+
 /// Single transaction from Helius webhook (Enhanced Transaction format)
 /// Reference: <https://docs.helius.dev/webhooks-and-websockets/webhooks>
 #[derive(Debug, Clone, Serialize, Deserialize)]

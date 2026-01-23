@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::error::AppError;
 use super::types::{
     BlockchainStatus, ComplianceStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest,
+    WalletRiskProfile,
 };
 use chrono::{DateTime, Utc};
 
@@ -71,6 +72,27 @@ pub trait DatabaseClient: Send + Sync {
         &self,
         signature: &str,
     ) -> Result<Option<TransferRequest>, AppError>;
+
+    // =========================================================================
+    // Risk Profile Methods (for pre-flight compliance screening cache)
+    // =========================================================================
+
+    /// Get a cached risk profile for a wallet address.
+    /// Returns None if not cached or cache expired (updated_at older than max_age_secs).
+    async fn get_risk_profile(
+        &self,
+        address: &str,
+        max_age_secs: i64,
+    ) -> Result<Option<WalletRiskProfile>, AppError> {
+        let _ = (address, max_age_secs);
+        Ok(None)
+    }
+
+    /// Upsert a risk profile for a wallet address.
+    async fn upsert_risk_profile(&self, profile: &WalletRiskProfile) -> Result<(), AppError> {
+        let _ = profile;
+        Ok(())
+    }
 }
 
 /// Blockchain client trait for chain operations

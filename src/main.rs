@@ -15,7 +15,7 @@ use solana_compliance_relayer::api::{
     RateLimitConfig, create_router, create_router_with_rate_limit,
 };
 use solana_compliance_relayer::app::{
-    AppState, WorkerConfig, spawn_worker, spawn_worker_with_privacy,
+    AppState, RiskService, WorkerConfig, spawn_worker, spawn_worker_with_privacy,
 };
 use solana_compliance_relayer::infra::RpcBlockchainClient;
 use solana_compliance_relayer::infra::blockchain::{QuickNodeTokenApiClient, RpcProviderType};
@@ -270,7 +270,24 @@ async fn main() -> Result<()> {
     } else {
         app_state
     };
-    let app_state = app_state.with_blocklist(blocklist);
+    let app_state = app_state.with_blocklist(Arc::clone(&blocklist));
+
+    // Initialize risk service for pre-flight compliance checks
+    let range_provider_arc = Arc::new(
+        solana_compliance_relayer::infra::RangeComplianceProvider::new(
+            config.range_api_key.clone(),
+            config.range_api_url.clone(),
+            Some(config.range_risk_threshold),
+        ),
+    );
+    let risk_service = Arc::new(RiskService::new(
+        Arc::clone(&app_state.db_client),
+        Arc::clone(&app_state.blockchain_client),
+        range_provider_arc,
+        Some(blocklist),
+    ));
+    let app_state = app_state.with_risk_service(risk_service);
+    info!("   ✓ Risk check service initialized");
 
     let app_state = Arc::new(app_state);
 

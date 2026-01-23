@@ -15,7 +15,8 @@ use crate::app::AppState;
 use crate::domain::{
     AppError, BlockchainError, DatabaseError, ErrorDetail, ErrorResponse, ExternalServiceError,
     HealthResponse, HealthStatus, HeliusTransaction, PaginatedResponse, PaginationParams,
-    RateLimitResponse, SubmitTransferRequest, TransferRequest,
+    RateLimitResponse, RiskCheckRequest, RiskCheckResult, SubmitTransferRequest, TransferRequest,
+    ValidationError,
 };
 
 /// OpenAPI documentation structure
@@ -41,6 +42,7 @@ use crate::domain::{
         health_check_handler,
         liveness_handler,
         readiness_handler,
+        risk_check_handler,
     ),
     components(
         schemas(
@@ -55,11 +57,14 @@ use crate::domain::{
             ErrorResponse,
             ErrorDetail,
             RateLimitResponse,
+            RiskCheckRequest,
+            RiskCheckResult,
         )
     ),
     tags(
         (name = "transfers", description = "Transfer request management endpoints"),
-        (name = "health", description = "Health check endpoints")
+        (name = "health", description = "Health check endpoints"),
+        (name = "compliance", description = "Compliance and risk check endpoints")
     )
 )]
 pub struct ApiDoc;
@@ -256,6 +261,48 @@ pub async fn helius_webhook_handler(
     );
 
     Ok(StatusCode::OK)
+}
+
+/// Check wallet risk status (pre-flight compliance check)
+///
+/// Returns aggregated risk data from internal blocklist, Range Protocol,
+/// and Helius DAS. Results are cached to reduce API costs.
+///
+/// **Response types:**
+/// - `blocked`: Wallet found in internal blocklist (no external API calls made)
+/// - `analyzed`: Wallet checked against external providers with risk scoring
+#[utoipa::path(
+    post,
+    path = "/risk-check",
+    tag = "compliance",
+    request_body = RiskCheckRequest,
+    responses(
+        (status = 200, description = "Risk check completed", body = RiskCheckResult),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = RateLimitResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 501, description = "Risk service not configured", body = ErrorResponse)
+    )
+)]
+pub async fn risk_check_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RiskCheckRequest>,
+) -> Result<Json<RiskCheckResult>, AppError> {
+    // Validate address is not empty
+    if payload.address.trim().is_empty() {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "address".to_string(),
+            message: "Address is required".to_string(),
+        }));
+    }
+
+    let risk_service = state
+        .risk_service
+        .as_ref()
+        .ok_or_else(|| AppError::NotSupported("Risk check service not configured".to_string()))?;
+
+    let result = risk_service.check_wallet_risk(&payload.address).await?;
+    Ok(Json(result))
 }
 
 impl IntoResponse for AppError {

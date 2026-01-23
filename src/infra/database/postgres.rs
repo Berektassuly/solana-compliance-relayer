@@ -9,7 +9,7 @@ use tracing::{info, instrument};
 use crate::domain::types::TransferType;
 use crate::domain::{
     AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, PaginatedResponse,
-    SubmitTransferRequest, TransferRequest,
+    SubmitTransferRequest, TransferRequest, WalletRiskProfile,
 };
 
 /// PostgreSQL connection pool configuration
@@ -478,6 +478,76 @@ impl DatabaseClient for PostgresClient {
             Some(row) => Ok(Some(Self::row_to_transfer_request(&row)?)),
             None => Ok(None),
         }
+    }
+
+    // =========================================================================
+    // Risk Profile Methods (for pre-flight compliance screening cache)
+    // =========================================================================
+
+    #[instrument(skip(self))]
+    async fn get_risk_profile(
+        &self,
+        address: &str,
+        max_age_secs: i64,
+    ) -> Result<Option<WalletRiskProfile>, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT address, risk_score, risk_level, reasoning,
+                   has_sanctioned_assets, helius_assets_checked, created_at, updated_at
+            FROM wallet_risk_profiles
+            WHERE address = $1
+              AND updated_at > NOW() - make_interval(secs => $2)
+            "#,
+        )
+        .bind(address)
+        .bind(max_age_secs as f64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        match row {
+            Some(row) => Ok(Some(WalletRiskProfile {
+                address: row.get("address"),
+                risk_score: row.get("risk_score"),
+                risk_level: row.get("risk_level"),
+                reasoning: row.get("reasoning"),
+                has_sanctioned_assets: row.get("has_sanctioned_assets"),
+                helius_assets_checked: row.get("helius_assets_checked"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    #[instrument(skip(self, profile))]
+    async fn upsert_risk_profile(&self, profile: &WalletRiskProfile) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            INSERT INTO wallet_risk_profiles 
+                (address, risk_score, risk_level, reasoning, 
+                 has_sanctioned_assets, helius_assets_checked, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                risk_score = EXCLUDED.risk_score,
+                risk_level = EXCLUDED.risk_level,
+                reasoning = EXCLUDED.reasoning,
+                has_sanctioned_assets = EXCLUDED.has_sanctioned_assets,
+                helius_assets_checked = EXCLUDED.helius_assets_checked,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&profile.address)
+        .bind(profile.risk_score)
+        .bind(&profile.risk_level)
+        .bind(&profile.reasoning)
+        .bind(profile.has_sanctioned_assets)
+        .bind(profile.helius_assets_checked)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        Ok(())
     }
 }
 

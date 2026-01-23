@@ -130,7 +130,7 @@ impl RangeComplianceProvider {
     }
 
     /// Call Range Protocol Risk API
-    async fn check_address_risk(&self, address: &str) -> Result<RiskResponse, AppError> {
+    pub async fn check_address_risk(&self, address: &str) -> Result<RiskResponse, AppError> {
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             AppError::ExternalService(crate::domain::ExternalServiceError::Configuration(
                 "RANGE_API_KEY not configured".to_string(),
