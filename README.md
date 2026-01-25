@@ -62,7 +62,7 @@ The system implements a **three-stage pipeline**:
 
 2. **Compliance Gate (Range Protocol)**: Before any blockchain call, wallet addresses are screened against sanctions lists, PEP databases, and on-chain risk signals.
 
-3. **Execution & Finalization (Helius)**: Approved transactions are submitted via Helius RPC with priority fee optimization. Webhooks provide real-time confirmation callbacks.
+3. **Execution & Finalization (Helius / QuickNode)**: Approved transactions are submitted via Helius or QuickNode RPC with priority fee optimization. Helius Enhanced Webhooks (or provider-specific callbacks) provide real-time confirmation.
 
 ---
 
@@ -85,8 +85,9 @@ This project implements **Hexagonal Architecture** (Ports and Adapters), ensurin
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │                        API Layer                                │    │
 │  │  POST /transfer-requests  │  GET /transfer-requests/{id}        │    │
-│  │  POST /webhooks/helius    │  GET /health                        │    │
-│  └──────────────────────────────┬──────────────────────────────────┘    │
+│  │  POST /webhooks/helius    │  GET /health, /health/live, /ready  │    │
+│  │  POST /risk-check         │  /admin/blocklist (CRUD)            │    │
+│  └─────────────────────────────┬───────────────────────────────────┘    │
 │                                 │                                       │
 │  ┌──────────────────────────────▼──────────────────────────────────┐    │
 │  │                      Application Layer                          │    │
@@ -116,6 +117,8 @@ src/
 │   └── error.rs     # Unified error types
 ├── app/             # Application layer (Use Cases)
 │   ├── service.rs   # Business logic orchestration
+│   ├── state.rs     # AppState (service, blocklist, risk_service, etc.)
+│   ├── risk_service.rs  # Pre-flight risk check (blocklist + Range + DAS)
 │   └── worker.rs    # Background retry worker with exponential backoff
 ├── api/             # HTTP interface (Primary Adapter)
 │   ├── handlers.rs  # Axum route handlers with OpenAPI docs
@@ -123,9 +126,10 @@ src/
 │   └── router.rs    # Rate limiting, CORS, middleware
 └── infra/           # External integrations (Secondary Adapters)
     ├── database/    # PostgreSQL via SQLx (compile-time checked)
-    ├── blockchain/  # Solana via Helius/QuickNode/Standard RPC
+    ├── blockchain/  # Solana via Helius/QuickNode/Standard RPC (strategies)
     ├── blocklist/   # Internal blocklist with DashMap + PostgreSQL
-    └── compliance/  # Range Protocol integration
+    ├── compliance/  # Range Protocol integration
+    └── privacy/     # QuickNode Privacy Health Check (confidential transfers)
 ```
 
 ---
@@ -215,16 +219,18 @@ sequenceDiagram
 
 | Component | Technology |
 |-----------|------------|
-| Language | Rust 1.75+ |
+| Language | Rust 1.85+ (2024 edition) |
 | Web Framework | Axum 0.8 |
-| Database | PostgreSQL 16+ (SQLx with compile-time verification) |
-| Async Runtime | Tokio |
-| HTTP Client | Reqwest |
-| Rate Limiting | Governor |
-| API Docs | utoipa (OpenAPI 3.0) |
-| Middleware | Tower-HTTP (tracing, timeout, CORS) |
+| Database | PostgreSQL 16+ (SQLx 0.8, compile-time verification) |
+| Async Runtime | Tokio 1.48 |
+| HTTP Client | Reqwest 0.12 |
+| Rate Limiting | Governor 0.10 |
+| API Docs | utoipa 5, utoipa-swagger-ui 9 (OpenAPI 3.0) |
+| Middleware | Tower 0.5, Tower-HTTP 0.6 (tracing, timeout, CORS) |
 
 ### Frontend
+
+The frontend lives in a [separate repository](https://github.com/Berektassuly/solana-compliance-relayer-frontend).
 
 | Component | Technology |
 |-----------|------------|
@@ -237,17 +243,18 @@ sequenceDiagram
 
 | Component | Technology |
 |-----------|------------|
-| Signing | Ed25519-dalek (WASM-compiled) |
-| ZK Proofs | solana-zk-sdk, spl-token-confidential-transfer-proof-generation |
-| Key Derivation | ElGamal, AES-256 |
+| Signing | ed25519-dalek 2.1 (WASM-compiled) |
+| ZK Proofs | solana-zk-sdk 4.0, spl-token-confidential-transfer-proof-generation 0.5 |
+| Encryption | ElGamal, AES (solana-zk-sdk) |
 
 ### Infrastructure
 
 | Component | Technology |
 |-----------|------------|
-| RPC Provider | Helius / QuickNode (auto-detected) |
+| RPC Provider | Helius / QuickNode (auto-detected via URL) |
 | Compliance | Range Protocol Risk API |
-| Deployment (Backend) | Railway |
+| Internal Blocklist | DashMap 6 (O(1) cache) + PostgreSQL |
+| Deployment (Backend) | Railway / Docker |
 | Deployment (Frontend) | Vercel |
 | Database Hosting | Railway PostgreSQL |
 
@@ -302,8 +309,8 @@ The relayer includes a high-performance internal blocklist that acts as a "hot c
 │  └──────────────────┘    └──────────────────┘     └───────────────┘ │
 │         │                         │                                 │
 │         ▼                         ▼                                 │
-│    Instant reject           Risk score ≥70                          │
-│    (no API call)            = Rejected                              │
+│    Instant reject           Risk score ≥ threshold                  │
+│    (no API call)            (default: 6, scale 1–10) = Rejected     │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -378,15 +385,16 @@ Transactions progress through the following states:
 
 ### Prerequisites
 
-- Rust 1.75+
+- Rust 1.85+ (2024 edition)
 - Node.js 18+ (for frontend)
 - Docker & Docker Compose
 - PostgreSQL 16+
+- [sqlx-cli](https://github.com/launchbadge/sqlx) for migrations
 
 ### Quick Start
 
 ```bash
-# Clone the repository
+# Clone backend and frontend (frontend is a separate repo)
 git clone https://github.com/berektassuly/solana-compliance-relayer.git
 git clone https://github.com/Berektassuly/solana-compliance-relayer-frontend.git
 cd solana-compliance-relayer
@@ -399,36 +407,53 @@ cargo sqlx migrate run
 
 # Start the backend
 cargo run
+```
 
-# In another terminal, start the frontend
-cd frontend
+The backend runs on `http://localhost:3000`.
+
+In another terminal, run the frontend:
+
+```bash
+cd ../solana-compliance-relayer-frontend
 pnpm install
 pnpm run dev
 ```
 
-The backend will start on `http://localhost:3000`.
-The frontend will start on `http://localhost:3001`.
+The frontend runs on `http://localhost:3001`.
 
 ---
 
 ## Environment Configuration
 
-Create a `.env` file in the project root. See `.env.example` for all options.
+Create a `.env` file in the project root. See [`.env.example`](.env.example) for all options.
 
 ### Critical Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius recommended) |
+| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius/QuickNode recommended) |
 | `ISSUER_PRIVATE_KEY` | Yes | Base58 relayer wallet private key |
-| `HELIUS_API_KEY` | Recommended | Enables priority fees and DAS checks (auto-detected from RPC URL) |
-| `HELIUS_WEBHOOK_SECRET` | Recommended | Authorization header for webhook validation |
+| `HELIUS_WEBHOOK_SECRET` | Recommended | Authorization header for Helius webhook validation |
 | `RANGE_API_KEY` | No | Range Protocol API key (mock mode if absent) |
-| `RANGE_RISK_THRESHOLD` | No | Risk score threshold (1-10, default: 6 = High Risk) |
+| `RANGE_API_URL` | No | Override Range API base URL (default: `https://api.range.org/v1`) |
+| `RANGE_RISK_THRESHOLD` | No | Risk score threshold 1–10 (default: 6 = High Risk); ≥ threshold = reject |
 
-> **Recommended** = Highly recommended for production  
-> **No** = Falls back to default/mock mode if not set
+### Optional Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HOST` | Bind interface (default: `0.0.0.0`) |
+| `PORT` | Server port (default: `3000`) |
+| `ENABLE_RATE_LIMITING` | Governor rate limiting (default: `false`) |
+| `RATE_LIMIT_RPS` | Requests per second (default: `10`) |
+| `RATE_LIMIT_BURST` | Burst size (default: `20`) |
+| `ENABLE_BACKGROUND_WORKER` | Retry worker for pending submissions (default: `true`) |
+| `ENABLE_PRIVACY_CHECKS` | QuickNode Privacy Health Check for confidential transfers (default: `true`) |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated CORS origins; `localhost:3000` and `localhost:3001` always allowed |
+| `RUST_LOG` | Log level (e.g. `info,tower_http=debug,sqlx=warn`) |
+
+> **Note:** Priority fees and DAS are auto-detected from `SOLANA_RPC_URL` (Helius/QuickNode). No separate `HELIUS_API_KEY` is used.
 
 ### Example Production Configuration
 
@@ -443,7 +468,8 @@ HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 
 # Compliance
 RANGE_API_KEY=YOUR_RANGE_KEY
-RANGE_RISK_THRESHOLD=6  # 1-10, higher = more permissive (default: 6 = High Risk)
+RANGE_RISK_THRESHOLD=6
+# RANGE_API_URL=https://api.range.org/v1
 
 # Server
 HOST=0.0.0.0
@@ -452,6 +478,14 @@ PORT=3000
 # Features
 ENABLE_RATE_LIMITING=true
 ENABLE_BACKGROUND_WORKER=true
+ENABLE_PRIVACY_CHECKS=true
+
+# Rate limiting
+RATE_LIMIT_RPS=10
+RATE_LIMIT_BURST=20
+
+# CORS (optional)
+CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 ```
 
 ---
@@ -475,7 +509,7 @@ ENABLE_BACKGROUND_WORKER=true
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/admin/blocklist` | Add address to internal blocklist |
+| `POST` | `/admin/blocklist` | Add address to internal blocklist. Body: `{"address": "...", "reason": "..."}` |
 | `GET` | `/admin/blocklist` | List all blocklisted addresses |
 | `DELETE` | `/admin/blocklist/{address}` | Remove address from blocklist |
 
@@ -483,7 +517,7 @@ ENABLE_BACKGROUND_WORKER=true
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/risk-check` | Pre-flight wallet risk check (aggregates blocklist, Range, Helius DAS) |
+| `POST` | `/risk-check` | Pre-flight wallet risk check (aggregates blocklist, Range, Helius DAS). Request body: `{"address": "<wallet_pubkey>"}`. Results cached 1 hour. |
 
 ### Interactive Documentation
 
@@ -514,7 +548,7 @@ The project includes CLI utilities for generating valid transfer requests with p
 
 ### generate_transfer_request
 
-Generates a complete, signed transfer request and outputs a ready-to-use curl command.
+Generates a complete, signed transfer request and outputs a ready-to-use curl command. Uses a dev keypair (or override via code). **For production, use client-side signing.**
 
 ```bash
 # Generate a public SOL transfer (1 SOL)
@@ -564,9 +598,21 @@ cargo run --bin generate_transfer_request -- --confidential
 
 This outputs:
 - Equality proof (~200 bytes)
-- Ciphertext validity proof (~400 bytes)  
+- Ciphertext validity proof (~400 bytes)
 - Range proof (~700 bytes)
 - New decryptable balance (36 bytes)
+
+### setup_and_generate
+
+Creates real on-chain confidential transfer state on the **zk-edge** testnet (`https://zk-edge.surfnet.dev:8899`), then generates valid ZK proofs and a `TransferRequest` JSON for the relayer. Use this for end-to-end testing of Token-2022 confidential transfers.
+
+**Steps:** Create mint → source/dest token accounts → mint → deposit → apply pending balance → generate ZK proofs → output curl command.
+
+```bash
+cargo run --bin setup_and_generate
+```
+
+Requires airdrop-funded authority on zk-edge. Output includes mint, ATAs, and a ready-to-use `curl` for `POST /transfer-requests`.
 
 ---
 
@@ -579,10 +625,18 @@ cargo test
 # Run with verbose output
 cargo test -- --nocapture
 
-# Run integration tests (requires Docker)
+# Run integration tests (requires PostgreSQL, e.g. docker-compose)
 cargo test --test integration_test
 
-# Run with coverage
+# Database integration tests (single-threaded)
+cargo test --test database_integration -- --test-threads=1
+
+# API and infra tests
+cargo test --test api_requests
+cargo test --test infra_blockchain_http_tests
+cargo test --test infra_compliance_tests
+
+# Coverage (requires cargo-tarpaulin)
 cargo tarpaulin --out Html
 ```
 
@@ -590,17 +644,28 @@ cargo tarpaulin --out Html
 
 ## Deployment
 
-### Railway (Backend)
+### Backend (Railway)
 
 1. Connect repository to Railway
 2. Add PostgreSQL service
-3. Set environment variables
+3. Set environment variables (see [Environment Configuration](#environment-configuration))
 4. Configure build command: `cargo build --release`
 5. Configure start command: `./target/release/solana-compliance-relayer`
 
-### Vercel (Frontend)
+### Backend (Docker)
 
-1. Import frontend directory
+A [Dockerfile](Dockerfile) is provided. Build and run:
+
+```bash
+docker build -t solana-compliance-relayer .
+docker run --env-file .env -p 3000:3000 solana-compliance-relayer
+```
+
+Ensure PostgreSQL is reachable (e.g. via `DATABASE_URL`). Use [docker-compose](docker-compose.yml) for local PostgreSQL.
+
+### Frontend (Vercel)
+
+1. Import the [frontend repository](https://github.com/Berektassuly/solana-compliance-relayer-frontend)
 2. Configure environment variables for API URL
 3. Deploy with default Next.js preset
 
@@ -628,6 +693,7 @@ cargo tarpaulin --out Html
 | 7 | Token-2022 confidential transfer support | Complete |
 | 8 | Internal Blocklist Manager with admin API | Complete |
 | 9 | Pre-Flight Risk Check with persistent caching | Complete |
+| 10 | `setup_and_generate` CLI for zk-edge confidential transfers | Complete |
 
 ---
 
