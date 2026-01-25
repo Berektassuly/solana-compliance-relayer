@@ -57,17 +57,21 @@ The Helius webhook is responsible for notifying the backend when transactions ar
 
 #### Step 3: Configure the Authorization Header
 
-In the Helius dashboard, add an **Auth Header**:
+The backend compares the **raw value** of the `Authorization` header to `HELIUS_WEBHOOK_SECRET` (exact string match, no `Bearer ` prefix).
+
+In the Helius dashboard, set **Auth Header** to the literal secret value, e.g.:
 
 ```
-Authorization: your-secret-value-here
+your-secret-value-here
 ```
 
-Then set the same value in your Railway environment:
+Then set the **same** value in your environment:
 
 ```bash
 HELIUS_WEBHOOK_SECRET=your-secret-value-here
 ```
+
+The backend uses `headers.get("Authorization")` and checks `auth_header == expected_secret`. Ensure Helius sends the header value as exactly this string.
 
 #### Step 4: Verify the Handshake
 
@@ -89,11 +93,13 @@ if let Some(expected_secret) = &state.helius_webhook_secret {
 
 #### Step 5: Monitor Webhook Delivery
 
-Check your application logs for these messages:
+Check your application logs for messages like:
 
 ```
-INFO Helius webhook processed received=1 processed=1
+Helius webhook processed received=1 processed=1
 ```
+
+(Exact format depends on your `tracing` configuration; look for `received` and `processed`.)
 
 If you see `received=1 processed=0`, the signature was not found in the database. Verify:
 - The relayer wallet public key is in the webhook's Account Addresses
@@ -109,9 +115,13 @@ The system operates in **Mock Mode** when `RANGE_API_KEY` is not set or empty. T
 
 **Mock Mode Behavior** (from `src/infra/compliance/range.rs`):
 
+Mock mode is active when `RANGE_API_KEY` is **not set or empty**. The provider uses `mock_check`:
+
 ```rust
 fn mock_check(&self, to_address: &str) -> ComplianceStatus {
-    // Block addresses starting with "hack"
+    if to_address == "hack_the_planet_bad_wallet" {
+        return ComplianceStatus::Rejected;
+    }
     if to_address.to_lowercase().starts_with("hack") {
         return ComplianceStatus::Rejected;
     }
@@ -138,7 +148,8 @@ fn evaluate_risk(&self, response: &RiskResponse) -> ComplianceStatus {
     
     // Text-based checks are conditional on the threshold level
     let text_indicates_risk = (self.risk_threshold <= 6 && risk_level_lower.contains("high"))
-        || (self.risk_threshold <= 8 && risk_level_lower.contains("extremely"))
+        || (self.risk_threshold <= 8
+            && (risk_level_lower.contains("severe") || risk_level_lower.contains("extremely")))
         || risk_level_lower.contains("critical");
     
     if exceeds_threshold || text_indicates_risk {
@@ -264,16 +275,23 @@ The signing message format must be identical on both sides:
 
 **Debug Technique**:
 
-Add logging to both WASM and backend to compare the exact bytes being signed:
+Add logging to both WASM and backend to compare the exact bytes being signed. The backend uses `SubmitTransferRequest::create_signing_message()` in `src/domain/types.rs`, which returns `Vec<u8>`. To log the string:
 
 ```rust
-// Backend: src/domain/types.rs
+// Backend: src/domain/types.rs — temporary debug addition
 pub fn create_signing_message(&self) -> Vec<u8> {
-    let msg = format!(...);
+    let amount_part = match &self.transfer_details {
+        TransferType::Public { amount } => amount.to_string(),
+        TransferType::Confidential { .. } => "confidential".to_string(),
+    };
+    let mint_part = self.token_mint.as_deref().unwrap_or("SOL");
+    let msg = format!("{}:{}:{}:{}", self.from_address, self.to_address, amount_part, mint_part);
     tracing::debug!(message = %msg, "Signing message constructed");
     msg.into_bytes()
 }
 ```
+
+Ensure the format is exactly `{from}:{to}:{amount|confidential}:{token_mint|SOL}` with no extra spaces or newlines.
 
 ---
 
@@ -326,6 +344,8 @@ Generate a confidential transfer with real ZK proofs:
 ```bash
 cargo run --bin generate_transfer_request -- --confidential
 ```
+
+The binary supports only `--confidential`; there is no `--help` flag. Other args are ignored.
 
 This generates:
 - ElGamal keypairs for source and destination
@@ -395,9 +415,11 @@ curl -X POST 'http://localhost:3000/transfer-requests' \
 ```json
 {
   "compliance_status": "rejected",
-  "blockchain_status": "pending"
+  "blockchain_status": "failed"
 }
 ```
+
+Rejected requests are persisted with `blockchain_status: failed` and a `blockchain_last_error` reason (e.g. `Blocklist: ...` or `Range Protocol: ...`).
 
 Verify persistence:
 
@@ -456,9 +478,11 @@ curl -X POST 'http://localhost:3000/risk-check' \
 {
   "status": "blocked",
   "address": "4oS78GPe66RqBduuAeiMFANf27FpmgXNwokZ3ocN4z1B",
-  "reason": "Internal Security Alert: Address linked to Phishing Scam"
+  "reason": "Internal Security Alert: Address linked to Phishing Scam (Flagged manually)"
 }
 ```
+
+(The `reason` is the exact blocklist entry from the pre-seeded migration.)
 
 #### Verify Cache Behavior
 
@@ -498,8 +522,8 @@ Call the same clean address twice:
 
 | Transition | Triggered By |
 |------------|--------------|
-| `pending` -> `approved` | Range Protocol returns risk_score < 70 |
-| `pending` -> `rejected` | Range Protocol returns risk_score >= 70 or API error |
+| `pending` -> `approved` | Range Protocol returns risk_score < threshold (default 6) and no risk text |
+| `pending` -> `rejected` | Range Protocol returns risk_score >= threshold, or risk text match, or API error |
 
 ---
 
@@ -559,7 +583,7 @@ ORDER BY minute DESC;
 
 ### Worker Claim Mechanism
 
-The worker uses `FOR UPDATE SKIP LOCKED` to atomically claim tasks without race conditions when multiple replicas are running:
+The worker uses `FOR UPDATE SKIP LOCKED` to atomically claim tasks without race conditions when multiple replicas are running. Implementation: `src/infra/database/postgres.rs` → `get_pending_blockchain_requests`. The actual query uses bound parameters `$1` (now) and `$2` (batch size); conceptually:
 
 ```sql
 UPDATE transfer_requests
@@ -578,7 +602,7 @@ WHERE id IN (
 RETURNING *;
 ```
 
-This ensures:
+The `LIMIT` is the worker `batch_size` (default 10, from `WorkerConfig` in `src/app/worker.rs`). This ensures:
 1. Only eligible transactions are selected
 2. Locked rows are skipped (preventing duplicate processing)
 3. Status is atomically updated before returning
@@ -589,7 +613,7 @@ This ensures:
 
 | Symptom | Root Cause | Solution |
 |---------|------------|----------|
-| `401 Unauthorized` on webhook | `HELIUS_WEBHOOK_SECRET` mismatch | Verify the secret matches exactly between Helius dashboard and Railway env var |
+| `401 Unauthorized` on webhook | `HELIUS_WEBHOOK_SECRET` mismatch | The backend compares the raw `Authorization` header value to `HELIUS_WEBHOOK_SECRET`. Ensure Helius sends exactly that string (no `Bearer ` prefix) and the env var matches. |
 | `Authorization error: Signature verification failed` | Message format mismatch | Compare signing message bytes between WASM and backend; check for encoding differences |
 | `module-not-found` WASM error | Next.js not finding .wasm file | Rebuild WASM, delete `.next` directory, configure `next.config.js` for WASM |
 | `429 Too Many Requests` from RPC | Rate limit exceeded | Implement request throttling; upgrade to paid tier; use QuickNode/Helius |
@@ -618,16 +642,15 @@ This ensures:
    solana transfer NEW_PUBKEY 1 --from OLD_KEYPAIR
    ```
 
-3. **Update Helius webhook** to include the new public key in Account Addresses
+3. **Update Helius webhook** to include the new public key in Account Addresses.
 
-4. **Deploy with new key**:
-   ```bash
-   ISSUER_PRIVATE_KEY=$(cat new-relayer-keypair.json | jq -r '.[0:64] | @base58')
-   ```
+4. **Export the new key as Base58**: The relayer expects `ISSUER_PRIVATE_KEY` as a Base58-encoded private key. The keypair JSON is a 64-byte array; use a secure method to convert to Base58 (e.g. a small script with `bs58` or your key-management tool). **Never commit raw keypair files.**
 
-5. **Verify operation** before removing old key from webhook
+5. **Deploy with new key**: Set `ISSUER_PRIVATE_KEY` to the Base58 value in your environment (Railway, etc.).
 
-6. **Remove old key** from Helius webhook Account Addresses
+6. **Verify operation** before removing the old key from the webhook.
+
+7. **Remove old key** from Helius webhook Account Addresses.
 
 ---
 
@@ -647,7 +670,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(10),  // How often to check for pending txs
-            batch_size: 10,                          // Max txs to process per cycle
+            batch_size: 10,                          // Max txs to process per cycle (worker claim LIMIT)
             enabled: true,
             enable_privacy_checks: true,
         }
@@ -655,7 +678,7 @@ impl Default for WorkerConfig {
 }
 ```
 
-To modify in production, change defaults and redeploy, or add environment variable parsing.
+`poll_interval` and `batch_size` are **not** read from environment variables; they are set in code. To tune in production, change defaults in `WorkerConfig` and redeploy, or add env parsing (e.g. `WORKER_POLL_INTERVAL_SECS`, `WORKER_BATCH_SIZE`).
 
 ---
 
@@ -675,7 +698,7 @@ To modify in production, change defaults and redeploy, or add environment variab
 
 ### PostgreSQL Connection Pool Tuning
 
-Modify in `src/infra/database/postgres.rs`:
+Pool configuration is **code-only** (no environment variables). Modify `PostgresConfig` in `src/infra/database/postgres.rs`:
 
 ```rust
 impl Default for PostgresConfig {
@@ -691,6 +714,8 @@ impl Default for PostgresConfig {
 }
 ```
 
+The pool is created in `PostgresClient::new()` via `PgPoolOptions`. To tune via env (e.g. `PG_MAX_CONNECTIONS`), add parsing and pass a custom `PostgresConfig`.
+
 **Railway PostgreSQL Recommendations**:
 - **Starter**: max_connections = 5-10
 - **Pro**: max_connections = 20-50
@@ -705,20 +730,26 @@ impl Default for PostgresConfig {
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `SOLANA_RPC_URL` | Yes | `devnet` | Solana RPC endpoint |
+| `SOLANA_RPC_URL` | No | `https://api.devnet.solana.com` | Solana RPC endpoint (Helius/QuickNode recommended) |
 | `ISSUER_PRIVATE_KEY` | Yes | - | Base58 relayer wallet key |
 | `RANGE_API_KEY` | No | - | Range Protocol key (mock if absent) |
-| `RANGE_RISK_THRESHOLD` | No | `6` | Risk threshold (1-10, configurable) |
-| `HELIUS_WEBHOOK_SECRET` | No | - | Webhook auth header value |
+| `RANGE_API_URL` | No | `https://api.range.org/v1` | Override Range API base URL |
+| `RANGE_RISK_THRESHOLD` | No | `6` | Risk threshold (1-10); ≥ threshold = reject |
+| `HELIUS_WEBHOOK_SECRET` | No | - | Exact `Authorization` header value for Helius webhooks |
 | `ENABLE_RATE_LIMITING` | No | `false` | Governor middleware toggle |
+| `RATE_LIMIT_RPS` | No | `10` | Requests per second (general endpoints) |
+| `RATE_LIMIT_BURST` | No | `20` | Burst size before throttling |
 | `ENABLE_BACKGROUND_WORKER` | No | `true` | Worker process toggle |
+| `ENABLE_PRIVACY_CHECKS` | No | `true` | QuickNode Privacy Health Check for confidential transfers |
 | `HOST` | No | `0.0.0.0` | Bind address |
 | `PORT` | No | `3000` | Bind port |
+| `CORS_ALLOWED_ORIGINS` | No | (see `.env.example`) | Comma-separated CORS origins |
 
 ### Key File Locations
 
 | Purpose | Path |
 |---------|------|
+| Application config (env parsing) | `src/main.rs` (`Config` struct) |
 | API Handlers | `src/api/handlers.rs` |
 | Business Logic | `src/app/service.rs` |
 | Risk Check Service | `src/app/risk_service.rs` |
@@ -727,4 +758,5 @@ impl Default for PostgresConfig {
 | Blockchain Client | `src/infra/blockchain/solana.rs` |
 | Compliance Provider | `src/infra/compliance/range.rs` |
 | Provider Strategies | `src/infra/blockchain/strategies.rs` |
+| Signing message format | `src/domain/types.rs` (`SubmitTransferRequest::create_signing_message`) |
 | Migrations | `migrations/*.sql` |
