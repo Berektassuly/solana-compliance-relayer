@@ -612,12 +612,15 @@ impl RpcBlockchainClient {
     async fn submit_or_confirm_transaction(
         &self,
         transaction: &Transaction,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         let sdk_client = self.sdk_client.as_ref().ok_or_else(|| {
             AppError::Blockchain(BlockchainError::TransactionFailed(
                 "SDK client not available".to_string(),
             ))
         })?;
+
+        // Capture blockhash from the transaction for Jito double-spend protection (expiry checks)
+        let blockhash_str = transaction.message().recent_blockhash.to_string();
 
         if let Some(ref strategy) = self.submission_strategy {
             // Serialize transaction to Base58 for strategy submission
@@ -633,7 +636,7 @@ impl RpcBlockchainClient {
                 "Transaction submitted via submission strategy (confirmation pending)"
             );
 
-            Ok(signature)
+            Ok((signature, blockhash_str))
         } else {
             // No strategy - use SDK's blocking send_and_confirm
             let signature = sdk_client
@@ -646,7 +649,7 @@ impl RpcBlockchainClient {
                 "Transaction confirmed via SDK send_and_confirm"
             );
 
-            Ok(signature.to_string())
+            Ok((signature.to_string(), blockhash_str))
         }
     }
 
@@ -761,7 +764,10 @@ impl BlockchainClient for RpcBlockchainClient {
     }
 
     #[instrument(skip(self))]
-    async fn submit_transaction(&self, request: &TransferRequest) -> Result<String, AppError> {
+    async fn submit_transaction(
+        &self,
+        request: &TransferRequest,
+    ) -> Result<(String, String), AppError> {
         info!(id = %request.id, "Submitting transaction for request");
 
         // Check if we have SDK client (for real transactions)
@@ -769,7 +775,10 @@ impl BlockchainClient for RpcBlockchainClient {
             // Mock implementation for testing (when SDK client not available)
             debug!("Using mock implementation for submit_transaction");
             let signature = self.sign(request.id.as_bytes());
-            return Ok(format!("tx_{}", &signature[..16]));
+            return Ok((
+                format!("tx_{}", &signature[..16]),
+                "mock_blockhash".to_string(),
+            ));
         }
 
         // Dispatch based on TransferType
@@ -833,7 +842,7 @@ impl BlockchainClient for RpcBlockchainClient {
         equality_proof_base64: &str,
         ciphertext_validity_proof_base64: &str,
         range_proof_base64: &str,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         info!(
             to = %to_address,
             token_mint = %token_mint,
@@ -1427,7 +1436,7 @@ impl BlockchainClient for RpcBlockchainClient {
         // For the final transfer, we can use submit_or_confirm_transaction
         // (doesn't need to wait for subsequent transactions)
         // But for consistency with MEV protection, we use the strategy if available
-        let signature = self
+        let (signature, blockhash) = self
             .submit_or_confirm_transaction(&transfer_tx)
             .await
             .map_err(|e| {
@@ -1455,7 +1464,7 @@ impl BlockchainClient for RpcBlockchainClient {
             "Confidential transfer with split proofs completed successfully"
         );
 
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     #[instrument(skip(self))]
@@ -1535,7 +1544,7 @@ impl BlockchainClient for RpcBlockchainClient {
         &self,
         to_address: &str,
         amount_lamports: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         info!(to = %to_address, amount_lamports = %amount_lamports, "Transferring SOL");
 
         // Validate amount
@@ -1600,7 +1609,7 @@ impl BlockchainClient for RpcBlockchainClient {
         );
 
         // Submit via strategy if available, otherwise use SDK
-        let signature = self.submit_or_confirm_transaction(&transaction).await?;
+        let (signature, blockhash) = self.submit_or_confirm_transaction(&transaction).await?;
 
         info!(
             signature = %signature,
@@ -1611,7 +1620,7 @@ impl BlockchainClient for RpcBlockchainClient {
             "SOL transfer submitted"
         );
 
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     #[instrument(skip(self))]
@@ -1620,7 +1629,7 @@ impl BlockchainClient for RpcBlockchainClient {
         to_address: &str,
         token_mint: &str,
         amount: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         info!(to = %to_address, token_mint = %token_mint, amount = %amount, "Transferring SPL Token (raw units)");
 
         // Validate amount
@@ -1821,7 +1830,7 @@ impl BlockchainClient for RpcBlockchainClient {
         );
 
         // Submit via strategy if available, otherwise use SDK
-        let signature = self.submit_or_confirm_transaction(&transaction).await?;
+        let (signature, blockhash) = self.submit_or_confirm_transaction(&transaction).await?;
 
         info!(
             signature = %signature,
@@ -1834,7 +1843,7 @@ impl BlockchainClient for RpcBlockchainClient {
             "SPL Token transfer submitted (raw units)"
         );
 
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     /// Check if a wallet holds compliant assets using Helius DAS.
@@ -2689,8 +2698,9 @@ mod tests {
         };
         let result = client.submit_transaction(&request).await;
         assert!(result.is_ok());
-        let signature = result.unwrap();
+        let (signature, blockhash) = result.unwrap();
         assert!(signature.starts_with("tx_")); // Mock format
+        assert!(!blockhash.is_empty());
     }
 
     // --- RETRY LOGIC WITH CALL TRACKING ---

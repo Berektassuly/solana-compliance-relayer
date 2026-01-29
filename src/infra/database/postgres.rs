@@ -381,6 +381,7 @@ impl DatabaseClient for PostgresClient {
         signature: Option<&str>,
         error: Option<&str>,
         next_retry_at: Option<DateTime<Utc>>,
+        blockhash_used: Option<&str>,
     ) -> Result<(), AppError> {
         let now = Utc::now();
 
@@ -391,14 +392,16 @@ impl DatabaseClient for PostgresClient {
                 blockchain_signature = COALESCE($2, blockchain_signature),
                 blockchain_last_error = $3,
                 blockchain_next_retry_at = $4,
-                updated_at = $5
-            WHERE id = $6
+                blockhash_used = COALESCE($5, blockhash_used),
+                updated_at = $6
+            WHERE id = $7
             "#,
         )
         .bind(status.as_str())
         .bind(signature)
         .bind(error)
         .bind(next_retry_at)
+        .bind(blockhash_used)
         .bind(now)
         .bind(id)
         .execute(&self.pool)

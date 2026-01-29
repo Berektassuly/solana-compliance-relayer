@@ -148,6 +148,7 @@ impl AppService {
                         None,
                         Some(&format!("Blocklist: {}", reason)),
                         None,
+                        None,
                     )
                     .await?;
                 transfer_request.compliance_status = ComplianceStatus::Rejected;
@@ -175,6 +176,7 @@ impl AppService {
                         BlockchainStatus::Failed,
                         None,
                         Some(&format!("Blocklist: {}", reason)),
+                        None,
                         None,
                     )
                     .await?;
@@ -207,6 +209,7 @@ impl AppService {
                     BlockchainStatus::Failed,
                     None,
                     Some(rejection_reason),
+                    None,
                     None,
                 )
                 .await?;
@@ -245,6 +248,7 @@ impl AppService {
             .update_blockchain_status(
                 &transfer_request.id,
                 BlockchainStatus::PendingSubmission,
+                None,
                 None,
                 None,
                 None,
@@ -419,6 +423,7 @@ impl AppService {
                             Some(&original_sig),
                             None,
                             None,
+                            transfer_request.blockhash_used.as_deref(),
                         )
                         .await?;
                     self.db_client
@@ -457,7 +462,7 @@ impl AppService {
             .submit_transaction(&transfer_request)
             .await
         {
-            Ok(signature) => {
+            Ok((signature, blockhash)) => {
                 info!(id = %transfer_request.id, signature = %signature, "Retry submission successful");
                 self.db_client
                     .update_blockchain_status(
@@ -466,14 +471,16 @@ impl AppService {
                         Some(&signature),
                         None,
                         None,
+                        Some(&blockhash),
                     )
                     .await?;
                 self.db_client
-                    .update_jito_tracking(id, None, LastErrorType::None, None)
+                    .update_jito_tracking(id, None, LastErrorType::None, Some(&blockhash))
                     .await?;
                 let mut updated_request = transfer_request;
                 updated_request.blockchain_status = BlockchainStatus::Submitted;
-                updated_request.blockchain_signature = Some(signature);
+                updated_request.blockchain_signature = Some(signature.clone());
+                updated_request.blockhash_used = Some(blockhash);
                 updated_request.blockchain_last_error = None;
                 updated_request.blockchain_next_retry_at = None;
                 updated_request.last_error_type = LastErrorType::None;
@@ -494,7 +501,14 @@ impl AppService {
                 };
 
                 self.db_client
-                    .update_blockchain_status(id, status, None, Some(&e.to_string()), next_retry)
+                    .update_blockchain_status(
+                        id,
+                        status,
+                        None,
+                        Some(&e.to_string()),
+                        next_retry,
+                        None,
+                    )
                     .await?;
 
                 // Store Jito tracking info
@@ -582,6 +596,7 @@ impl AppService {
                             Some(original_sig),
                             None,
                             None,
+                            request.blockhash_used.as_deref(),
                         )
                         .await?;
                     // Clear error type since tx succeeded
@@ -636,6 +651,7 @@ impl AppService {
                                     None,
                                     Some("JitoStateUnknown: waiting for blockhash expiry"),
                                     Some(Utc::now() + Duration::seconds(backoff)),
+                                    None,
                                 )
                                 .await?;
                             return Ok(());
@@ -665,7 +681,7 @@ impl AppService {
         let result = self.blockchain_client.submit_transaction(request).await;
 
         match result {
-            Ok(signature) => {
+            Ok((signature, blockhash)) => {
                 let transfer_type = if request.token_mint.is_some() {
                     "Token"
                 } else {
@@ -679,11 +695,12 @@ impl AppService {
                         Some(&signature),
                         None,
                         None,
+                        Some(&blockhash),
                     )
                     .await?;
-                // Clear Jito tracking on success
+                // Clear Jito tracking on success (persist blockhash for future retry logic)
                 self.db_client
-                    .update_jito_tracking(&request.id, None, LastErrorType::None, None)
+                    .update_jito_tracking(&request.id, None, LastErrorType::None, Some(&blockhash))
                     .await?;
             }
             Err(e) => {
@@ -721,6 +738,7 @@ impl AppService {
                         None,
                         Some(&e.to_string()),
                         next_retry,
+                        None,
                     )
                     .await?;
 
@@ -799,6 +817,7 @@ impl AppService {
                             None,
                             error_msg.as_deref(),
                             None,
+                            None,
                         )
                         .await?;
 
@@ -862,6 +881,7 @@ impl AppService {
                             new_status,
                             None,
                             error_msg.as_deref(),
+                            None,
                             None,
                         )
                         .await?;

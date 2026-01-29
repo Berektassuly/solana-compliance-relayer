@@ -41,7 +41,8 @@ pub trait DatabaseClient: Send + Sync {
         cursor: Option<&str>,
     ) -> Result<PaginatedResponse<TransferRequest>, AppError>;
 
-    /// Update blockchain status for a transfer request
+    /// Update blockchain status for a transfer request.
+    /// When signature is set, blockhash_used can be set for Jito double-spend protection (expiry checks).
     async fn update_blockchain_status(
         &self,
         id: &str,
@@ -49,6 +50,7 @@ pub trait DatabaseClient: Send + Sync {
         signature: Option<&str>,
         error: Option<&str>,
         next_retry_at: Option<DateTime<Utc>>,
+        blockhash_used: Option<&str>,
     ) -> Result<(), AppError>;
 
     /// Update compliance status for a transfer request
@@ -141,8 +143,12 @@ pub trait BlockchainClient: Send + Sync {
     /// Check blockchain RPC connectivity
     async fn health_check(&self) -> Result<(), AppError>;
 
-    /// Submit a transaction using the transfer request details
-    async fn submit_transaction(&self, request: &TransferRequest) -> Result<String, AppError>;
+    /// Submit a transaction using the transfer request details.
+    /// Returns (signature, blockhash) for Jito double-spend protection (blockhash used for expiry checks).
+    async fn submit_transaction(
+        &self,
+        request: &TransferRequest,
+    ) -> Result<(String, String), AppError>;
 
     /// Get transaction confirmation status
     async fn get_transaction_status(&self, signature: &str) -> Result<bool, AppError> {
@@ -180,12 +186,12 @@ pub trait BlockchainClient: Send + Sync {
 
     /// Transfer SOL from the issuer wallet to a destination address
     /// Amount is in lamports (1 SOL = 1_000_000_000 lamports)
-    /// Returns the transaction signature on success
+    /// Returns (signature, blockhash) on success for Jito double-spend protection
     async fn transfer_sol(
         &self,
         to_address: &str,
         amount_lamports: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         let _ = (to_address, amount_lamports);
         Err(AppError::NotSupported(
             "transfer_sol not implemented".to_string(),
@@ -196,13 +202,13 @@ pub trait BlockchainClient: Send + Sync {
     /// Creates the destination ATA if it doesn't exist
     /// Amount is in raw token units (caller must pre-convert using token decimals)
     /// Example: 1 USDC (6 decimals) = 1_000_000 raw units
-    /// Returns the transaction signature on success
+    /// Returns (signature, blockhash) on success for Jito double-spend protection
     async fn transfer_token(
         &self,
         to_address: &str,
         token_mint: &str,
         amount: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         let _ = (to_address, token_mint, amount);
         Err(AppError::NotSupported(
             "transfer_token not implemented".to_string(),
@@ -212,6 +218,7 @@ pub trait BlockchainClient: Send + Sync {
     /// Transfer Token-2022 Confidential tokens
     /// The server constructs the instruction from structured proof components,
     /// ensuring full control over what it signs (mitigates Confused Deputy).
+    /// Returns (signature, blockhash) on success for Jito double-spend protection
     async fn transfer_confidential(
         &self,
         to_address: &str,
@@ -220,7 +227,7 @@ pub trait BlockchainClient: Send + Sync {
         equality_proof: &str,
         ciphertext_validity_proof: &str,
         range_proof: &str,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         let _ = (
             to_address,
             token_mint,
@@ -355,6 +362,7 @@ mod tests {
             _signature: Option<&str>,
             _error: Option<&str>,
             _next_retry_at: Option<DateTime<Utc>>,
+            _blockhash_used: Option<&str>,
         ) -> Result<(), AppError> {
             Ok(())
         }
@@ -394,8 +402,11 @@ mod tests {
             Ok(())
         }
 
-        async fn submit_transaction(&self, _request: &TransferRequest) -> Result<String, AppError> {
-            Ok("sig_123".to_string())
+        async fn submit_transaction(
+            &self,
+            _request: &TransferRequest,
+        ) -> Result<(String, String), AppError> {
+            Ok(("sig_123".to_string(), "blockhash_default".to_string()))
         }
     }
 

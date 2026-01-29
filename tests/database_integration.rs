@@ -169,6 +169,7 @@ async fn test_blockchain_status_updates() {
             None,
             Some("Initial error"),
             Some(chrono::Utc::now()),
+            None,
         )
         .await
         .expect("Failed to update status");
@@ -193,6 +194,7 @@ async fn test_blockchain_status_updates() {
             &created.id,
             BlockchainStatus::Submitted,
             Some("signature123"),
+            None,
             None,
             None,
         )
@@ -250,6 +252,7 @@ async fn test_get_pending_blockchain_requests() {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .expect("Failed to update status");
@@ -260,6 +263,7 @@ async fn test_get_pending_blockchain_requests() {
                     &item.id,
                     BlockchainStatus::Confirmed,
                     Some("sig"),
+                    None,
                     None,
                     None,
                 )

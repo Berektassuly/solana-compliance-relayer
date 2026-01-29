@@ -191,6 +191,7 @@ impl DatabaseClient for MockDatabaseClient {
         signature: Option<&str>,
         error: Option<&str>,
         next_retry_at: Option<DateTime<Utc>>,
+        blockhash_used: Option<&str>,
     ) -> Result<(), AppError> {
         self.check_should_fail()?;
         let mut storage = self.storage.lock().unwrap();
@@ -201,6 +202,9 @@ impl DatabaseClient for MockDatabaseClient {
             }
             item.blockchain_last_error = error.map(|e| e.to_string());
             item.blockchain_next_retry_at = next_retry_at;
+            if let Some(bh) = blockhash_used {
+                item.blockhash_used = Some(bh.to_string());
+            }
             item.updated_at = Utc::now();
         }
         Ok(())
@@ -348,13 +352,17 @@ impl BlockchainClient for MockBlockchainClient {
         self.check_should_fail()
     }
 
-    async fn submit_transaction(&self, request: &TransferRequest) -> Result<String, AppError> {
+    async fn submit_transaction(
+        &self,
+        request: &TransferRequest,
+    ) -> Result<(String, String), AppError> {
         self.check_should_fail()?;
         // Mock signature generation (e.g., hash of ID)
         let signature = format!("sig_{}", request.id);
+        let blockhash = "mock_blockhash_abc123".to_string();
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(request.id.clone());
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     async fn get_transaction_status(&self, _signature: &str) -> Result<bool, AppError> {
@@ -374,16 +382,17 @@ impl BlockchainClient for MockBlockchainClient {
         &self,
         to_address: &str,
         amount_lamports: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         self.check_should_fail()?;
         let signature = format!(
             "transfer_sig_{}_{}",
             &to_address[..8.min(to_address.len())],
             amount_lamports
         );
+        let blockhash = "mock_blockhash_sol_transfer".to_string();
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!("transfer:{}:{}", to_address, amount_lamports));
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     async fn transfer_token(
@@ -391,16 +400,17 @@ impl BlockchainClient for MockBlockchainClient {
         to_address: &str,
         token_mint: &str,
         amount: u64,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         self.check_should_fail()?;
         let mint_prefix = &token_mint[..8.min(token_mint.len())];
         let signature = format!("token_sig_{}_{}", mint_prefix, amount);
+        let blockhash = "mock_blockhash_token_transfer".to_string();
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
             "token_transfer:{}:{}:{}",
             to_address, token_mint, amount
         ));
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 
     async fn transfer_confidential(
@@ -411,10 +421,11 @@ impl BlockchainClient for MockBlockchainClient {
         equality_proof: &str,
         ciphertext_validity_proof: &str,
         range_proof: &str,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         self.check_should_fail()?;
         let mint_prefix = &token_mint[..8.min(token_mint.len())];
         let signature = format!("confidential_sig_{}", mint_prefix);
+        let blockhash = "mock_blockhash_confidential_transfer".to_string();
         let mut transactions = self.transactions.lock().unwrap();
         transactions.push(format!(
             "confidential_transfer:{}:{}:balance={}:eq={}:val={}:range={}",
@@ -425,7 +436,7 @@ impl BlockchainClient for MockBlockchainClient {
             ciphertext_validity_proof.len(),
             range_proof.len()
         ));
-        Ok(signature)
+        Ok((signature, blockhash))
     }
 }
 
