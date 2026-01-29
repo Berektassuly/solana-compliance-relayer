@@ -129,6 +129,13 @@ impl DatabaseClient for MockDatabaseClient {
             blockchain_retry_count: 0,
             blockchain_last_error: None,
             blockchain_next_retry_at: None,
+            // Jito Double Spend Protection fields
+            original_tx_signature: None,
+            last_error_type: crate::domain::LastErrorType::None,
+            blockhash_used: None,
+            // Request Uniqueness fields
+            nonce: Some(data.nonce.clone()),
+            client_signature: Some(data.signature.clone()),
             created_at: now,
             updated_at: now,
         };

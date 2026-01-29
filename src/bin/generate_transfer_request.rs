@@ -51,8 +51,8 @@ fn main() {
             (TransferType::Public { amount }, None, amount.to_string())
         };
 
-    // Generate a unique nonce (UUID v7 format for time-ordering)
-    let nonce = uuid::Uuid::now_v7().to_string();
+    // Generate a unique nonce (UUID v4)
+    let nonce = uuid::Uuid::new_v4().to_string();
 
     // Construct the message exactly as the server expects for signing:
     // "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}:{nonce}"

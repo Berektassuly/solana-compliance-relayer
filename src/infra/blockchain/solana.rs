@@ -8,6 +8,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info, instrument, warn};
 
@@ -1351,28 +1352,33 @@ impl BlockchainClient for RpcBlockchainClient {
         // All context accounts were used in the transfer and are no longer needed.
         // Close them to return rent-exempt lamports to the relayer.
 
+        let destination_pubkey = solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes());
+
         // Close equality proof context
-        let close_equality_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
-            &equality_ctx_address,
-            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
-            &authority_address,
-        );
+        let equality_ctx_info = ContextStateInfo {
+            context_state_account: &equality_ctx_address,
+            context_state_authority: &authority_address,
+        };
+        let close_equality_ctx_ix =
+            ProofInstruction::close_context_state(equality_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_equality_ctx_ix);
 
         // Close validity proof context
-        let close_validity_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
-            &validity_ctx_address,
-            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
-            &authority_address,
-        );
+        let validity_ctx_info = ContextStateInfo {
+            context_state_account: &validity_ctx_address,
+            context_state_authority: &authority_address,
+        };
+        let close_validity_ctx_ix =
+            ProofInstruction::close_context_state(validity_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_validity_ctx_ix);
 
         // Close range proof context
-        let close_range_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
-            &range_ctx_address,
-            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
-            &authority_address,
-        );
+        let range_ctx_info = ContextStateInfo {
+            context_state_account: &range_ctx_address,
+            context_state_authority: &authority_address,
+        };
+        let close_range_ctx_ix =
+            ProofInstruction::close_context_state(range_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_range_ctx_ix);
 
         // Close range proof record account (spl_record)
@@ -1911,10 +1917,7 @@ impl BlockchainClient for RpcBlockchainClient {
     async fn is_blockhash_valid(&self, blockhash: &str) -> Result<bool, AppError> {
         // Use the SDK client if available for accurate blockhash validation
         if let Some(sdk_client) = &self.sdk_client {
-            use solana_hash::Hash;
-            use std::str::FromStr;
-
-            let hash = Hash::from_str(blockhash).map_err(|e| {
+            let hash = solana_sdk::hash::Hash::from_str(blockhash).map_err(|e| {
                 AppError::Validation(crate::domain::ValidationError::InvalidField {
                     field: "blockhash".to_string(),
                     message: format!("Invalid blockhash format: {}", e),
@@ -1945,7 +1948,7 @@ impl BlockchainClient for RpcBlockchainClient {
         }
 
         match self
-            .rpc_call::<IsValidResult>("isBlockhashValid", params)
+            .rpc_call::<serde_json::Value, IsValidResult>("isBlockhashValid", params)
             .await
         {
             Ok(result) => {

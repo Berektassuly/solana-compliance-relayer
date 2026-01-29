@@ -627,8 +627,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let from_pubkey = authority.pubkey();
     let to_pubkey = destination_wallet.pubkey();
 
-    // Generate unique nonce (UUID v7 format)
-    let nonce = uuid::Uuid::now_v7().to_string();
+    // Generate unique nonce (UUID v4)
+    let nonce = uuid::Uuid::new_v4().to_string();
 
     // Create signing message with nonce
     let message = format!(

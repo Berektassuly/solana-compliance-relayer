@@ -6,10 +6,9 @@ use tracing::{error, info, instrument, warn};
 use validator::Validate;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainError, BlockchainStatus, ComplianceStatus,
-    DatabaseClient, HealthResponse, HealthStatus, HeliusTransaction, LastErrorType,
-    PaginatedResponse, QuickNodeWebhookEvent, SubmitTransferRequest, TransactionStatus,
-    TransferRequest, ValidationError,
+    AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
+    HealthStatus, HeliusTransaction, LastErrorType, PaginatedResponse, QuickNodeWebhookEvent,
+    SubmitTransferRequest, TransactionStatus, TransferRequest, ValidationError,
 };
 use crate::infra::BlocklistManager;
 
@@ -393,7 +392,7 @@ impl AppService {
         // =====================================================================
 
         if transfer_request.last_error_type == LastErrorType::JitoStateUnknown {
-            if let Some(ref original_sig) = transfer_request.original_tx_signature {
+            if let Some(original_sig) = transfer_request.original_tx_signature.clone() {
                 info!(
                     id = %transfer_request.id,
                     original_sig = %original_sig,
@@ -402,7 +401,7 @@ impl AppService {
 
                 match self
                     .blockchain_client
-                    .get_signature_status(original_sig)
+                    .get_signature_status(&original_sig)
                     .await
                 {
                     Ok(Some(TransactionStatus::Confirmed | TransactionStatus::Finalized)) => {
@@ -416,7 +415,7 @@ impl AppService {
                             .update_blockchain_status(
                                 id,
                                 BlockchainStatus::Submitted,
-                                Some(original_sig),
+                                Some(&original_sig),
                                 None,
                                 None,
                             )
@@ -427,7 +426,7 @@ impl AppService {
 
                         let mut updated_request = transfer_request;
                         updated_request.blockchain_status = BlockchainStatus::Submitted;
-                        updated_request.blockchain_signature = Some(original_sig.clone());
+                        updated_request.blockchain_signature = Some(original_sig);
                         updated_request.blockchain_last_error = None;
                         updated_request.last_error_type = LastErrorType::None;
                         return Ok(updated_request);
