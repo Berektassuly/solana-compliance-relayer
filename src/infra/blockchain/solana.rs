@@ -1282,7 +1282,7 @@ impl BlockchainClient for RpcBlockchainClient {
         let dest_account_result = sdk_client.get_account(&destination_ata).await;
         let mut transfer_instructions: Vec<Instruction> = vec![
             ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
-            ComputeBudgetInstruction::set_compute_unit_limit(400_000),
+            ComputeBudgetInstruction::set_compute_unit_limit(600_000), // Increased for close instructions
         ];
 
         if dest_account_result.is_err() {
@@ -1344,6 +1344,52 @@ impl BlockchainClient for RpcBlockchainClient {
         };
 
         transfer_instructions.push(transfer_ix);
+
+        // ====================================================================
+        // CLOSE CONTEXT ACCOUNTS TO RECOVER RENT
+        // ====================================================================
+        // All context accounts were used in the transfer and are no longer needed.
+        // Close them to return rent-exempt lamports to the relayer.
+
+        // Close equality proof context
+        let close_equality_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
+            &equality_ctx_address,
+            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
+            &authority_address,
+        );
+        transfer_instructions.push(close_equality_ctx_ix);
+
+        // Close validity proof context
+        let close_validity_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
+            &validity_ctx_address,
+            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
+            &authority_address,
+        );
+        transfer_instructions.push(close_validity_ctx_ix);
+
+        // Close range proof context
+        let close_range_ctx_ix = ProofInstruction::CloseContextState.encode_close_context_state(
+            &range_ctx_address,
+            &solana_sdk::pubkey::Pubkey::from(keypair.pubkey().to_bytes()),
+            &authority_address,
+        );
+        transfer_instructions.push(close_range_ctx_ix);
+
+        // Close range proof record account (spl_record)
+        let close_record_ix = spl_record::instruction::close_account(
+            &range_proof_record_pubkey,
+            &keypair.pubkey(), // destination (rent recovery)
+            &keypair.pubkey(), // authority
+        );
+        transfer_instructions.push(close_record_ix);
+
+        info!(
+            equality_ctx = %equality_context_pubkey,
+            validity_ctx = %validity_context_pubkey,
+            range_ctx = %range_context_pubkey,
+            range_record = %range_proof_record_pubkey,
+            "Added close instructions for all context accounts"
+        );
 
         // Append Jito tip instruction to FINAL transfer transaction only
         // (not to the proof verification transactions)
