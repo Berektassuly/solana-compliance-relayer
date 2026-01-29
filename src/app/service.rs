@@ -7,8 +7,8 @@ use validator::Validate;
 
 use crate::domain::{
     AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
-    HealthStatus, HeliusTransaction, PaginatedResponse, SubmitTransferRequest, TransferRequest,
-    ValidationError,
+    HealthStatus, HeliusTransaction, PaginatedResponse, QuickNodeWebhookEvent, SubmitTransferRequest,
+    TransferRequest, ValidationError,
 };
 use crate::infra::BlocklistManager;
 
@@ -531,6 +531,70 @@ impl AppService {
         }
 
         info!(processed = %processed, "Helius webhook processing complete");
+        Ok(processed)
+    }
+
+    /// Process incoming QuickNode webhook events.
+    /// Updates blockchain status for transactions we have initiated.
+    /// 
+    /// **IMPORTANT**: QuickNode webhooks can deliver an array of events in a single POST.
+    /// This method processes ALL events in the batch, not just a single event.
+    /// 
+    /// Returns the number of transactions actually processed (status updated).
+    #[instrument(skip(self, events), fields(event_count = %events.len()))]
+    pub async fn process_quicknode_webhook(
+        &self,
+        events: Vec<QuickNodeWebhookEvent>,
+    ) -> Result<usize, AppError> {
+        let mut processed = 0;
+
+        // Process ALL events in the batch (not 1:1 mapping of request to event)
+        for event in events {
+            // Look up by signature to see if this is one of our transactions
+            if let Some(request) = self
+                .db_client
+                .get_transfer_by_signature(&event.signature)
+                .await?
+            {
+                // Only update if currently in Submitted status (waiting for confirmation)
+                if request.blockchain_status == BlockchainStatus::Submitted {
+                    let (new_status, error_msg) = if event.is_success() {
+                        info!(
+                            id = %request.id,
+                            signature = %event.signature,
+                            slot = ?event.slot,
+                            "Transaction confirmed via QuickNode webhook"
+                        );
+                        (BlockchainStatus::Confirmed, None)
+                    } else {
+                        let err = event
+                            .error_message()
+                            .unwrap_or_else(|| "Unknown transaction error".to_string());
+                        warn!(
+                            id = %request.id,
+                            signature = %event.signature,
+                            error = %err,
+                            "Transaction failed via QuickNode webhook"
+                        );
+                        (BlockchainStatus::Failed, Some(err))
+                    };
+
+                    self.db_client
+                        .update_blockchain_status(
+                            &request.id,
+                            new_status,
+                            None,
+                            error_msg.as_deref(),
+                            None,
+                        )
+                        .await?;
+
+                    processed += 1;
+                }
+            }
+        }
+
+        info!(processed = %processed, "QuickNode webhook processing complete");
         Ok(processed)
     }
 }

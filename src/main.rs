@@ -44,6 +44,8 @@ struct Config {
     range_risk_threshold: i32,
     /// Helius webhook secret for authentication (optional)
     helius_webhook_secret: Option<String>,
+    /// QuickNode webhook secret for authentication (optional)
+    quicknode_webhook_secret: Option<String>,
     /// Enable privacy health checks for confidential transfers
     enable_privacy_checks: bool,
 }
@@ -72,6 +74,11 @@ impl Config {
 
         // Helius webhook configuration (optional)
         let helius_webhook_secret = env::var("HELIUS_WEBHOOK_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        // QuickNode webhook configuration (optional)
+        let quicknode_webhook_secret = env::var("QUICKNODE_WEBHOOK_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
 
@@ -108,6 +115,7 @@ impl Config {
             range_api_url,
             range_risk_threshold,
             helius_webhook_secret,
+            quicknode_webhook_secret,
             enable_privacy_checks,
         })
     }
@@ -228,17 +236,24 @@ async fn main() -> Result<()> {
     let blocklist = Arc::new(blocklist);
 
     // Create application state
-    let app_state = AppState::with_helius_secret(
+    let app_state = AppState::with_webhook_secrets(
         Arc::new(postgres_client),
         Arc::new(blockchain_client),
         Arc::new(compliance_provider),
         config.helius_webhook_secret.clone(),
+        config.quicknode_webhook_secret.clone(),
     );
 
     if config.helius_webhook_secret.is_some() {
         info!("   ✓ Helius webhook secret configured");
     } else {
         info!("   ○ Helius webhook secret not configured (webhook auth disabled)");
+    }
+    
+    if config.quicknode_webhook_secret.is_some() {
+        info!("   ✓ QuickNode webhook secret configured");
+    } else {
+        info!("   ○ QuickNode webhook secret not configured (webhook auth disabled)");
     }
 
     // Initialize privacy health check service (QuickNode only)

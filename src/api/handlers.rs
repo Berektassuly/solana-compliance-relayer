@@ -15,8 +15,8 @@ use crate::app::AppState;
 use crate::domain::{
     AppError, BlockchainError, DatabaseError, ErrorDetail, ErrorResponse, ExternalServiceError,
     HealthResponse, HealthStatus, HeliusTransaction, PaginatedResponse, PaginationParams,
-    RateLimitResponse, RiskCheckRequest, RiskCheckResult, SubmitTransferRequest, TransferRequest,
-    ValidationError,
+    QuickNodeWebhookPayload, RateLimitResponse, RiskCheckRequest, RiskCheckResult,
+    SubmitTransferRequest, TransferRequest, ValidationError,
 };
 
 /// OpenAPI documentation structure
@@ -258,6 +258,65 @@ pub async fn helius_webhook_handler(
         received = %tx_count,
         processed = %processed,
         "Helius webhook processed"
+    );
+
+    Ok(StatusCode::OK)
+}
+
+/// Handle QuickNode webhook for transaction confirmation
+///
+/// Receives transaction events from QuickNode Streams/Webhooks and updates transaction status.
+/// Validates the x-qn-signature header against the configured QUICKNODE_WEBHOOK_SECRET.
+///
+/// **IMPORTANT**: QuickNode webhooks can deliver an array of events in a single POST payload.
+/// This handler processes ALL events in the batch, not just a single event.
+///
+/// Reference: <https://www.quicknode.com/docs/webhooks>
+pub async fn quicknode_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<QuickNodeWebhookPayload>,
+) -> Result<StatusCode, AppError> {
+    // Validate webhook secret if configured
+    // QuickNode uses x-qn-signature header for HMAC validation
+    if let Some(expected_secret) = &state.quicknode_webhook_secret {
+        // QuickNode can use either x-qn-signature (HMAC) or Authorization header
+        let auth_header = headers
+            .get("x-qn-signature")
+            .or_else(|| headers.get("Authorization"))
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                AppError::Authentication(
+                    "Missing x-qn-signature or Authorization header".to_string(),
+                )
+            })?;
+
+        // For simple token validation (not HMAC)
+        // Note: For production HMAC validation, you'd need to verify the signature
+        // against the raw request body using the secret as key
+        if auth_header != expected_secret {
+            return Err(AppError::Authentication(
+                "Invalid webhook secret".to_string(),
+            ));
+        }
+    }
+
+    // Convert payload to events array (handles both single and batch payloads)
+    let events = payload.into_events();
+    let event_count = events.len();
+
+    info!(
+        event_count = %event_count,
+        "Processing QuickNode webhook batch"
+    );
+
+    // Process ALL events in the batch
+    let processed = state.service.process_quicknode_webhook(events).await?;
+
+    info!(
+        received = %event_count,
+        processed = %processed,
+        "QuickNode webhook processed"
     );
 
     Ok(StatusCode::OK)

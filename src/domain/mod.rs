@@ -10,6 +10,7 @@ pub use error::{
 pub use traits::{BlockchainClient, ComplianceProvider, DatabaseClient};
 pub use types::{
     BlockchainStatus, ComplianceStatus, ErrorDetail, ErrorResponse, HealthResponse, HealthStatus,
-    HeliusTransaction, PaginatedResponse, PaginationParams, RateLimitResponse, RiskCheckRequest,
+    HeliusTransaction, PaginatedResponse, PaginationParams, QuickNodeTransactionMeta,
+    QuickNodeWebhookEvent, QuickNodeWebhookPayload, RateLimitResponse, RiskCheckRequest,
     RiskCheckResult, SubmitTransferRequest, TransferRequest, TransferType, WalletRiskProfile,
 };

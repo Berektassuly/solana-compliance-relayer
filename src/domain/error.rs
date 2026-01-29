@@ -40,8 +40,21 @@ pub enum BlockchainError {
     DasComplianceFailed(String),
     #[error("QuickNode API error: {0}")]
     QuickNodeApiError(String),
+    /// Jito bundle submission definitely failed - safe to retry with new blockhash.
+    /// The bundle was rejected/dropped and was NOT processed.
     #[error("Jito bundle submission failed: {0}")]
     JitoBundleFailed(String),
+    /// Jito bundle state is unknown - DO NOT retry with new blockhash.
+    /// This occurs on timeouts, server errors, or ambiguous responses where
+    /// the bundle may have been processed. Retrying with a new blockhash could
+    /// lead to double-spend if the original bundle was actually processed.
+    /// 
+    /// The caller should either:
+    /// 1. Wait and check if the original transaction was confirmed
+    /// 2. Use the same blockhash for retry (which will fail safely if already processed)
+    /// 3. Mark as failed and require manual intervention
+    #[error("Jito bundle state unknown (DO NOT retry blindly): {0}")]
+    JitoStateUnknown(String),
     #[error("Private submission unavailable, falling back: {0}")]
     PrivateSubmissionFallback(String),
 }

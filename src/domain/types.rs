@@ -694,6 +694,104 @@ pub struct HeliusTransaction {
     pub source: String,
 }
 
+// ============================================================================
+// QuickNode Webhook Types
+// ============================================================================
+
+/// QuickNode webhook payload wrapper
+/// Reference: <https://www.quicknode.com/docs/webhooks>
+/// 
+/// QuickNode webhooks can deliver multiple events in a single POST payload.
+/// The payload is an array of events, NOT a single event object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum QuickNodeWebhookPayload {
+    /// Array of events (most common)
+    Events(Vec<QuickNodeWebhookEvent>),
+    /// Single event (for backwards compatibility)
+    Single(QuickNodeWebhookEvent),
+}
+
+impl QuickNodeWebhookPayload {
+    /// Convert to a vector of events for uniform processing
+    pub fn into_events(self) -> Vec<QuickNodeWebhookEvent> {
+        match self {
+            QuickNodeWebhookPayload::Events(events) => events,
+            QuickNodeWebhookPayload::Single(event) => vec![event],
+        }
+    }
+}
+
+/// Single event from QuickNode Streams/Webhooks
+/// 
+/// QuickNode Streams can be configured with various filters and templates.
+/// For transaction confirmation, we use the "Solana Transaction" template
+/// which provides transaction metadata including signature and status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickNodeWebhookEvent {
+    /// Transaction signature (base58)
+    pub signature: String,
+    
+    /// Slot number where the transaction was processed
+    #[serde(default)]
+    pub slot: Option<u64>,
+    
+    /// Block time (Unix timestamp) when the transaction was processed
+    #[serde(default)]
+    pub block_time: Option<i64>,
+    
+    /// Transaction error (null if successful)
+    /// Can be a string error message or structured error object
+    #[serde(default)]
+    pub err: Option<serde_json::Value>,
+    
+    /// Transaction metadata (varies based on Stream template)
+    #[serde(default)]
+    pub meta: Option<QuickNodeTransactionMeta>,
+}
+
+impl QuickNodeWebhookEvent {
+    /// Check if the transaction was successful
+    pub fn is_success(&self) -> bool {
+        self.err.is_none() && self.meta.as_ref().map_or(true, |m| m.err.is_none())
+    }
+    
+    /// Get the error message if the transaction failed
+    pub fn error_message(&self) -> Option<String> {
+        if let Some(err) = &self.err {
+            return Some(err.to_string());
+        }
+        if let Some(meta) = &self.meta {
+            if let Some(err) = &meta.err {
+                return Some(err.to_string());
+            }
+        }
+        None
+    }
+}
+
+/// Transaction metadata from QuickNode webhook
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickNodeTransactionMeta {
+    /// Transaction error from meta (null if successful)
+    #[serde(default)]
+    pub err: Option<serde_json::Value>,
+    
+    /// Fee in lamports
+    #[serde(default)]
+    pub fee: Option<u64>,
+    
+    /// Pre-transaction balances
+    #[serde(default)]
+    pub pre_balances: Vec<u64>,
+    
+    /// Post-transaction balances
+    #[serde(default)]
+    pub post_balances: Vec<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,5 +938,86 @@ mod tests {
                 amount: 5_000_000_000
             }
         );
+    }
+
+    // ========================================================================
+    // QuickNode Webhook Types Tests
+    // ========================================================================
+
+    #[test]
+    fn test_quicknode_webhook_payload_batch_parsing() {
+        // QuickNode webhooks can deliver an array of events (most common case)
+        let json = r#"[
+            {"signature": "sig1", "slot": 12345, "err": null},
+            {"signature": "sig2", "slot": 12346, "err": null},
+            {"signature": "sig3", "slot": 12347, "err": {"InstructionError": [0, "Custom error"]}}
+        ]"#;
+
+        let payload: QuickNodeWebhookPayload = serde_json::from_str(json).unwrap();
+        let events = payload.into_events();
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].signature, "sig1");
+        assert_eq!(events[1].signature, "sig2");
+        assert_eq!(events[2].signature, "sig3");
+    }
+
+    #[test]
+    fn test_quicknode_webhook_payload_single_parsing() {
+        // Single event (less common but supported)
+        let json = r#"{"signature": "single_sig", "slot": 99999}"#;
+
+        let payload: QuickNodeWebhookPayload = serde_json::from_str(json).unwrap();
+        let events = payload.into_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].signature, "single_sig");
+        assert_eq!(events[0].slot, Some(99999));
+    }
+
+    #[test]
+    fn test_quicknode_webhook_event_success_detection() {
+        // Successful transaction (no error)
+        let event = QuickNodeWebhookEvent {
+            signature: "success_sig".to_string(),
+            slot: Some(12345),
+            block_time: Some(1700000000),
+            err: None,
+            meta: None,
+        };
+        assert!(event.is_success());
+        assert!(event.error_message().is_none());
+
+        // Failed transaction (err field set)
+        let event = QuickNodeWebhookEvent {
+            signature: "failed_sig".to_string(),
+            slot: Some(12345),
+            block_time: Some(1700000000),
+            err: Some(serde_json::json!({"InstructionError": [0, "Custom error"]})),
+            meta: None,
+        };
+        assert!(!event.is_success());
+        assert!(event.error_message().is_some());
+    }
+
+    #[test]
+    fn test_quicknode_webhook_event_meta_error() {
+        // Failed transaction (error in meta.err)
+        let meta = QuickNodeTransactionMeta {
+            err: Some(serde_json::json!("InsufficientFunds")),
+            fee: Some(5000),
+            pre_balances: vec![1000000, 0],
+            post_balances: vec![995000, 0],
+        };
+
+        let event = QuickNodeWebhookEvent {
+            signature: "meta_error_sig".to_string(),
+            slot: Some(12345),
+            block_time: None,
+            err: None,
+            meta: Some(meta),
+        };
+        assert!(!event.is_success());
+        assert!(event.error_message().is_some());
     }
 }

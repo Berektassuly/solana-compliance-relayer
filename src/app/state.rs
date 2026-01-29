@@ -18,6 +18,9 @@ pub struct AppState {
     pub compliance_provider: Arc<dyn ComplianceProvider>,
     /// Helius webhook secret for authentication (optional)
     pub helius_webhook_secret: Option<String>,
+    /// QuickNode webhook secret for authentication (optional)
+    /// Used to validate incoming webhook payloads from QuickNode Streams
+    pub quicknode_webhook_secret: Option<String>,
     /// Privacy health check service for confidential transfers
     pub privacy_service: Option<Arc<PrivacyHealthCheckService>>,
     /// Internal blocklist manager for local address screening
@@ -34,7 +37,7 @@ impl AppState {
         blockchain_client: Arc<dyn BlockchainClient>,
         compliance_provider: Arc<dyn ComplianceProvider>,
     ) -> Self {
-        Self::with_helius_secret(db_client, blockchain_client, compliance_provider, None)
+        Self::with_webhook_secrets(db_client, blockchain_client, compliance_provider, None, None)
     }
 
     /// Create a new application state with Helius webhook secret
@@ -44,6 +47,18 @@ impl AppState {
         blockchain_client: Arc<dyn BlockchainClient>,
         compliance_provider: Arc<dyn ComplianceProvider>,
         helius_webhook_secret: Option<String>,
+    ) -> Self {
+        Self::with_webhook_secrets(db_client, blockchain_client, compliance_provider, helius_webhook_secret, None)
+    }
+
+    /// Create a new application state with both Helius and QuickNode webhook secrets
+    #[must_use]
+    pub fn with_webhook_secrets(
+        db_client: Arc<dyn DatabaseClient>,
+        blockchain_client: Arc<dyn BlockchainClient>,
+        compliance_provider: Arc<dyn ComplianceProvider>,
+        helius_webhook_secret: Option<String>,
+        quicknode_webhook_secret: Option<String>,
     ) -> Self {
         let service = Arc::new(AppService::new(
             Arc::clone(&db_client),
@@ -56,6 +71,7 @@ impl AppState {
             blockchain_client,
             compliance_provider,
             helius_webhook_secret,
+            quicknode_webhook_secret,
             privacy_service: None,
             blocklist: None,
             risk_service: None,
