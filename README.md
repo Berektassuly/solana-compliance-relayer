@@ -26,6 +26,8 @@
 - [Technical Stack](#technical-stack)
 - [RPC Provider Strategy](#rpc-provider-strategy)
 - [Jito Bundle Integration (MEV Protection)](#jito-bundle-integration-mev-protection)
+- [Double-Spend Protection](#double-spend-protection)
+- [Internal Blocklist Manager](#internal-blocklist-manager)
 - [Transaction Lifecycle](#transaction-lifecycle)
 - [Getting Started](#getting-started)
 - [Environment Configuration](#environment-configuration)
@@ -214,6 +216,15 @@ sequenceDiagram
 | **Rate Limiting** | Governor-based middleware with configurable RPS and burst limits |
 | **OpenAPI Documentation** | Auto-generated Swagger UI at `/swagger-ui` |
 
+### Enterprise-Grade Security Features
+
+| Feature | Description |
+|-----------|-------------|
+| **MEV-Protected Transactions ("Ghost Mode")** | Transactions are submitted privately via Jito Bundles, preventing front-running and sandwich attacks. Your transaction value stays with you. |
+| **Double-Spend Protection** | Advanced retry mechanism that queries on-chain status (`getSignatureStatuses`) before re-broadcasting after ambiguous failures. Prevents losses during network timeouts or Jito `StateUnknown` responses. |
+| **Smart Rent Recovery** | Automatically closes ephemeral ZK-proof context accounts after confidential transfers, recovering ~0.002-0.01 SOL per transaction that would otherwise be permanently locked. |
+| **Dual-Confirmation System** | Real-time transaction status updates via QuickNode Streams (Webhooks) and Helius Enhanced Webhooks for instant finalization visibility. |
+
 ---
 
 ## Technical Stack
@@ -352,6 +363,73 @@ JITO_REGION=ny
 1. **QuickNode RPC endpoint** with the ["Lil' JIT - JITO Bundles and transactions"](https://marketplace.quicknode.com/add-on/lil-jit-jito-bundles-and-transactions) add-on enabled
 2. `USE_JITO_BUNDLES=true` in environment
 3. Sufficient SOL balance for transaction fees + tip
+
+---
+
+## Double-Spend Protection
+
+When a Jito bundle submission returns an ambiguous state (`JitoStateUnknown`), the relayer implements **status-aware retry logic** to prevent double-spend scenarios.
+
+### The Problem
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Without Double-Spend Protection                      │
+│                                                                         │
+│  Submit TX → Jito Timeout → Retry with NEW blockhash → DOUBLE SPEND!    │
+│             (original may have actually landed)                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### The Solution
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    With Double-Spend Protection                         │
+│                                                                         │
+│  Submit TX → Jito Timeout → Query getSignatureStatuses(original_sig)    │
+│                                       │                                 │
+│               ┌───────────────────────┼───────────────────────┐         │
+│               ▼                       ▼                       ▼         │
+│           Confirmed?              Not Found?                Failed?     │
+│           Mark SUCCESS         Check Blockhash              Safe to     │
+│           (no retry!)             Expired?                  Retry       │
+│                                     │                                   │
+│                           ┌─────────┴─────────┐                         │
+│                           ▼                   ▼                         │
+│                      Still Valid?         Expired?                      │
+│                      Wait longer      Safe to retry                     │
+│                      (backoff)       (new blockhash)                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+1. **Original Signature Tracking**: When a transaction is first submitted, the signature and blockhash are stored in the database.
+
+2. **Error Classification**: Errors are classified into types:
+   - `JitoStateUnknown` - Ambiguous state, MUST check status before retry
+   - `JitoBundleFailed` - Definite failure, safe to retry
+   - `TransactionFailed` - On-chain failure, safe to retry
+   - `NetworkError` - Connection issues, safe to retry
+
+3. **Status Verification**: Before retrying a `JitoStateUnknown` error:
+   - Query `getSignatureStatuses` for the original transaction
+   - If **Confirmed/Finalized**: Mark as success, no retry needed
+   - If **Failed**: Safe to retry with new blockhash
+   - If **Not Found**: Check if blockhash has expired (~150 slots)
+     - Blockhash valid: Wait longer with exponential backoff
+     - Blockhash expired: Safe to retry with new blockhash
+
+### Database Tracking
+
+The relayer stores three additional fields for each transaction:
+
+| Field | Purpose |
+|-------|---------|
+| `original_tx_signature` | First signature used, for status verification |
+| `last_error_type` | Classification of last error for smart retry logic |
+| `blockhash_used` | Blockhash from last attempt, for expiry checking |
 
 ---
 
@@ -517,15 +595,28 @@ Create a `.env` file in the project root. See [`.env.example`](.env.example) for
 | `CORS_ALLOWED_ORIGINS` | Comma-separated CORS origins; `localhost:3000` and `localhost:3001` always allowed |
 | `RUST_LOG` | Log level (e.g. `info,tower_http=debug,sqlx=warn`) |
 
+### RPC Provider Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint. Supports **Helius** (`helius-rpc.com`), **QuickNode** (`quiknode.pro`), or standard RPC. Provider-specific features (priority fees, DAS, Jito) are auto-detected from the URL. |
+
 ### Jito MEV Protection Variables (QuickNode only)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `USE_JITO_BUNDLES` | `false` | Enable "Ghost Mode" - private transaction submission via Jito block builders for MEV protection |
+| `JITO_TIP_LAMPORTS` | `10000` | Tip amount in lamports for Jito block builders (0.00001 SOL). Higher tips increase inclusion priority. Recommended: 10,000-50,000 |
+| `JITO_REGION` | auto | Optional region for lower latency: `ny`, `amsterdam`, `frankfurt`, `tokyo` |
+
+### Webhook Variables
 
 | Variable | Description |
 |----------|-------------|
-| `USE_JITO_BUNDLES` | Enable Jito bundle submission for MEV protection (default: `false`) |
-| `JITO_TIP_LAMPORTS` | Tip amount in lamports for Jito block builders (default: `10000` = 0.00001 SOL) |
-| `JITO_REGION` | Optional region for lower latency: `ny`, `amsterdam`, `frankfurt`, `tokyo` (default: auto) |
+| `HELIUS_WEBHOOK_SECRET` | Authorization header value for validating Helius webhook requests |
+| `QUICKNODE_WEBHOOK_SECRET` | Authorization header value for validating QuickNode Streams (webhook) requests |
 
-> **Note:** Priority fees and DAS are auto-detected from `SOLANA_RPC_URL` (Helius/QuickNode). Jito bundles require QuickNode with the "Lil' JIT" add-on.
+> **Note:** Priority fees and DAS compliance are auto-detected from `SOLANA_RPC_URL` (Helius/QuickNode). Jito bundles require QuickNode with the "Lil' JIT" add-on enabled.
 
 ### Example Production Configuration (Helius)
 
@@ -803,6 +894,9 @@ Ensure PostgreSQL is reachable (e.g. via `DATABASE_URL`). Use [docker-compose](d
 | 9 | Pre-Flight Risk Check with persistent caching | Complete |
 | 10 | `setup_and_generate` CLI for zk-edge confidential transfers | Complete |
 | 11 | **Jito Bundle Integration (MEV Protection)** | Complete |
+| 12 | **Smart Rent Recovery** (auto-close ZK context accounts) | Complete |
+| 13 | **Double-Spend Protection** (status-aware retry for JitoStateUnknown) | Complete |
+| 14 | **QuickNode Streams Integration** (dual-confirmation webhooks) | Complete |
 
 ---
 
