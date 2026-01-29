@@ -35,8 +35,8 @@ use crate::domain::{ErrorDetail, ErrorResponse, RateLimitResponse};
 use super::admin::{add_blocklist_handler, list_blocklist_handler, remove_blocklist_handler};
 use super::handlers::{
     ApiDoc, get_transfer_request_handler, health_check_handler, helius_webhook_handler,
-    list_transfer_requests_handler, liveness_handler, quicknode_webhook_handler,
-    readiness_handler, retry_blockchain_handler, risk_check_handler, submit_transfer_handler,
+    list_transfer_requests_handler, liveness_handler, quicknode_webhook_handler, readiness_handler,
+    retry_blockchain_handler, risk_check_handler, submit_transfer_handler,
 };
 
 /// Rate limiter configuration

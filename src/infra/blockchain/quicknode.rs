@@ -214,7 +214,7 @@ impl QuickNodePrivateSubmissionStrategy {
                     ),
                 ));
             }
-            
+
             // Check for definite rejection errors (safe to retry)
             // These are Jito-specific error codes indicating bundle was definitely not processed
             let definite_rejection_codes = [-32602, -32603]; // Invalid params, internal errors before processing
@@ -225,17 +225,20 @@ impl QuickNodePrivateSubmissionStrategy {
                 || message_lower.contains("invalid")
                 || message_lower.contains("expired")
                 || message_lower.contains("simulation failed");
-                
+
             if is_definite_rejection {
                 return Err(AppError::Blockchain(BlockchainError::JitoBundleFailed(
                     error.message,
                 )));
             }
-            
+
             // Other errors are ambiguous
             warn!(code = error.code, message = %error.message, "Jito error with unknown outcome");
             return Err(AppError::Blockchain(BlockchainError::JitoStateUnknown(
-                format!("Jito error {}: {} - bundle may have been processed", error.code, error.message),
+                format!(
+                    "Jito error {}: {} - bundle may have been processed",
+                    error.code, error.message
+                ),
             )));
         }
 
@@ -765,7 +768,8 @@ mod tests {
     #[test]
     fn test_jito_bundle_response_error_parsing() {
         // Test that JitoBundleResponse correctly parses errors
-        let json_with_error = r#"{"error": {"code": -32601, "message": "Method not found"}, "result": null}"#;
+        let json_with_error =
+            r#"{"error": {"code": -32601, "message": "Method not found"}, "result": null}"#;
         let response: JitoBundleResponse = serde_json::from_str(json_with_error).unwrap();
         assert!(response.result.is_none());
         assert!(response.error.is_some());

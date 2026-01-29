@@ -7,8 +7,8 @@ use validator::Validate;
 
 use crate::domain::{
     AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
-    HealthStatus, HeliusTransaction, PaginatedResponse, QuickNodeWebhookEvent, SubmitTransferRequest,
-    TransferRequest, ValidationError,
+    HealthStatus, HeliusTransaction, PaginatedResponse, QuickNodeWebhookEvent,
+    SubmitTransferRequest, TransferRequest, ValidationError,
 };
 use crate::infra::BlocklistManager;
 
@@ -536,10 +536,10 @@ impl AppService {
 
     /// Process incoming QuickNode webhook events.
     /// Updates blockchain status for transactions we have initiated.
-    /// 
+    ///
     /// **IMPORTANT**: QuickNode webhooks can deliver an array of events in a single POST.
     /// This method processes ALL events in the batch, not just a single event.
-    /// 
+    ///
     /// Returns the number of transactions actually processed (status updated).
     #[instrument(skip(self, events), fields(event_count = %events.len()))]
     pub async fn process_quicknode_webhook(

@@ -37,7 +37,13 @@ impl AppState {
         blockchain_client: Arc<dyn BlockchainClient>,
         compliance_provider: Arc<dyn ComplianceProvider>,
     ) -> Self {
-        Self::with_webhook_secrets(db_client, blockchain_client, compliance_provider, None, None)
+        Self::with_webhook_secrets(
+            db_client,
+            blockchain_client,
+            compliance_provider,
+            None,
+            None,
+        )
     }
 
     /// Create a new application state with Helius webhook secret
@@ -48,7 +54,13 @@ impl AppState {
         compliance_provider: Arc<dyn ComplianceProvider>,
         helius_webhook_secret: Option<String>,
     ) -> Self {
-        Self::with_webhook_secrets(db_client, blockchain_client, compliance_provider, helius_webhook_secret, None)
+        Self::with_webhook_secrets(
+            db_client,
+            blockchain_client,
+            compliance_provider,
+            helius_webhook_secret,
+            None,
+        )
     }
 
     /// Create a new application state with both Helius and QuickNode webhook secrets

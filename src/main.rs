@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
     } else {
         info!("   ○ Helius webhook secret not configured (webhook auth disabled)");
     }
-    
+
     if config.quicknode_webhook_secret.is_some() {
         info!("   ✓ QuickNode webhook secret configured");
     } else {

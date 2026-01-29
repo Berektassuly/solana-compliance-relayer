@@ -700,7 +700,7 @@ pub struct HeliusTransaction {
 
 /// QuickNode webhook payload wrapper
 /// Reference: <https://www.quicknode.com/docs/webhooks>
-/// 
+///
 /// QuickNode webhooks can deliver multiple events in a single POST payload.
 /// The payload is an array of events, NOT a single event object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -723,7 +723,7 @@ impl QuickNodeWebhookPayload {
 }
 
 /// Single event from QuickNode Streams/Webhooks
-/// 
+///
 /// QuickNode Streams can be configured with various filters and templates.
 /// For transaction confirmation, we use the "Solana Transaction" template
 /// which provides transaction metadata including signature and status.
@@ -732,20 +732,20 @@ impl QuickNodeWebhookPayload {
 pub struct QuickNodeWebhookEvent {
     /// Transaction signature (base58)
     pub signature: String,
-    
+
     /// Slot number where the transaction was processed
     #[serde(default)]
     pub slot: Option<u64>,
-    
+
     /// Block time (Unix timestamp) when the transaction was processed
     #[serde(default)]
     pub block_time: Option<i64>,
-    
+
     /// Transaction error (null if successful)
     /// Can be a string error message or structured error object
     #[serde(default)]
     pub err: Option<serde_json::Value>,
-    
+
     /// Transaction metadata (varies based on Stream template)
     #[serde(default)]
     pub meta: Option<QuickNodeTransactionMeta>,
@@ -754,18 +754,18 @@ pub struct QuickNodeWebhookEvent {
 impl QuickNodeWebhookEvent {
     /// Check if the transaction was successful
     pub fn is_success(&self) -> bool {
-        self.err.is_none() && self.meta.as_ref().map_or(true, |m| m.err.is_none())
+        self.err.is_none() && self.meta.as_ref().is_none_or(|m| m.err.is_none())
     }
-    
+
     /// Get the error message if the transaction failed
     pub fn error_message(&self) -> Option<String> {
         if let Some(err) = &self.err {
             return Some(err.to_string());
         }
-        if let Some(meta) = &self.meta {
-            if let Some(err) = &meta.err {
-                return Some(err.to_string());
-            }
+        if let Some(meta) = &self.meta
+            && let Some(err) = &meta.err
+        {
+            return Some(err.to_string());
         }
         None
     }
@@ -778,15 +778,15 @@ pub struct QuickNodeTransactionMeta {
     /// Transaction error from meta (null if successful)
     #[serde(default)]
     pub err: Option<serde_json::Value>,
-    
+
     /// Fee in lamports
     #[serde(default)]
     pub fee: Option<u64>,
-    
+
     /// Pre-transaction balances
     #[serde(default)]
     pub pre_balances: Vec<u64>,
-    
+
     /// Post-transaction balances
     #[serde(default)]
     pub post_balances: Vec<u64>,

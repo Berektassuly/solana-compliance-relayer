@@ -48,7 +48,7 @@ pub enum BlockchainError {
     /// This occurs on timeouts, server errors, or ambiguous responses where
     /// the bundle may have been processed. Retrying with a new blockhash could
     /// lead to double-spend if the original bundle was actually processed.
-    /// 
+    ///
     /// The caller should either:
     /// 1. Wait and check if the original transaction was confirmed
     /// 2. Use the same blockhash for retry (which will fail safely if already processed)
