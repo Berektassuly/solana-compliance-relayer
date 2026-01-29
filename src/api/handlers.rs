@@ -115,13 +115,13 @@ pub async fn submit_transfer_handler(
         .map(String::from);
 
     // If Idempotency-Key header is provided, it must match the body nonce
-    if let Some(ref key) = idempotency_key {
-        if key != &payload.nonce {
-            return Err(AppError::Validation(ValidationError::InvalidField {
-                field: "Idempotency-Key".to_string(),
-                message: "Header must match body nonce".to_string(),
-            }));
-        }
+    if let Some(ref key) = idempotency_key
+        && key != &payload.nonce
+    {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "Idempotency-Key".to_string(),
+            message: "Header must match body nonce".to_string(),
+        }));
     }
 
     // Check for existing request with same nonce (idempotent return)
@@ -441,18 +441,17 @@ fn parse_quicknode_payload(payload: &serde_json::Value) -> Vec<QuickNodeWebhookE
                 events.push(create_event(sig, Some(item)));
             }
             // Nested transaction.signatures array (common in Solana RPC format)
-            else if let Some(tx) = item.get("transaction") {
-                if let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array()) {
-                    if let Some(first_sig) = sigs.first().and_then(|v| v.as_str()) {
-                        events.push(create_event(first_sig, Some(item)));
-                    }
-                }
+            else if let Some(tx) = item.get("transaction")
+                && let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array())
+                && let Some(first_sig) = sigs.first().and_then(|v| v.as_str())
+            {
+                events.push(create_event(first_sig, Some(item)));
             }
             // Try "data" wrapper
-            else if let Some(data) = item.get("data") {
-                if let Some(sig) = data.get("signature").and_then(|v| v.as_str()) {
-                    events.push(create_event(sig, Some(data)));
-                }
+            else if let Some(data) = item.get("data")
+                && let Some(sig) = data.get("signature").and_then(|v| v.as_str())
+            {
+                events.push(create_event(sig, Some(data)));
             }
         }
     }
@@ -463,12 +462,11 @@ fn parse_quicknode_payload(payload: &serde_json::Value) -> Vec<QuickNodeWebhookE
             events.push(create_event(sig, Some(payload)));
         }
         // Nested transaction.signatures
-        else if let Some(tx) = obj.get("transaction") {
-            if let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array()) {
-                if let Some(first_sig) = sigs.first().and_then(|v| v.as_str()) {
-                    events.push(create_event(first_sig, Some(payload)));
-                }
-            }
+        else if let Some(tx) = obj.get("transaction")
+            && let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array())
+            && let Some(first_sig) = sigs.first().and_then(|v| v.as_str())
+        {
+            events.push(create_event(first_sig, Some(payload)));
         }
         // Check for "data" array wrapper
         else if let Some(data_arr) = obj.get("data").and_then(|v| v.as_array()) {
@@ -483,10 +481,10 @@ fn parse_quicknode_payload(payload: &serde_json::Value) -> Vec<QuickNodeWebhookE
             for tx in txs {
                 if let Some(sig) = tx.get("signature").and_then(|v| v.as_str()) {
                     events.push(create_event(sig, Some(tx)));
-                } else if let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array()) {
-                    if let Some(first_sig) = sigs.first().and_then(|v| v.as_str()) {
-                        events.push(create_event(first_sig, Some(tx)));
-                    }
+                } else if let Some(sigs) = tx.get("signatures").and_then(|v| v.as_array())
+                    && let Some(first_sig) = sigs.first().and_then(|v| v.as_str())
+                {
+                    events.push(create_event(first_sig, Some(tx)));
                 }
             }
         }
