@@ -32,6 +32,7 @@
 - [Getting Started](#getting-started)
 - [Environment Configuration](#environment-configuration)
 - [API Reference](#api-reference)
+- [Client Integration / SDK](#client-integration--sdk)
 - [CLI Tools](#cli-tools)
 - [Testing](#testing)
 - [Deployment](#deployment)
@@ -153,9 +154,10 @@ sequenceDiagram
 
     User->>WASM: Initiate Transfer
     WASM->>WASM: Ed25519 Sign (Client-Side)
-    WASM->>API: POST /transfer-requests (Signed Payload)
+    WASM->>API: POST /transfer-requests (Signed Payload + nonce)
     
-    API->>API: Verify Ed25519 Signature
+    API->>API: Verify Ed25519 Signature (message includes nonce)
+    API->>API: Check Idempotency (existing nonce → return existing)
     API->>API: Check Internal Blocklist (DashMap)
     
     alt Address in Internal Blocklist
@@ -204,6 +206,8 @@ sequenceDiagram
 | Feature | Description |
 |-----------|-------------|
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
+| **Replay Attack Protection** | Cryptographic enforcement of request uniqueness via **nonces**. Every request must include a unique nonce in the body and in the signed message; the server rejects duplicates and replays. |
+| **API Idempotency** | Safe retries using **Idempotency-Key** headers to prevent duplicate processing. Resend the same request with the same key to receive the original response without creating a second transfer. |
 | **MEV Protection (Jito Bundles)** | Private transaction submission via Jito block builders, bypassing the public mempool |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
 | **Pre-Flight Risk Check** | `POST /risk-check` aggregates blocklist, Range Protocol, and Helius DAS data with 1-hour caching |
@@ -723,11 +727,35 @@ CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 - **Swagger UI:** `http://localhost:3000/swagger-ui`
 - **OpenAPI Spec:** `http://localhost:3000/api-docs/openapi.json`
 
+### Request Uniqueness (Nonce & Idempotency)
+
+**Breaking change (v2.0):** Every `POST /transfer-requests` request must include a **nonce** in the body, and the **signature must be computed over a message that includes the nonce**. This prevents replay attacks and enables idempotent retries.
+
+- **Nonce:** Required. A unique value per request (e.g. UUID v4 or v7). Must be 32–64 characters, alphanumeric with optional hyphens.
+- **Idempotency-Key header:** Optional but **recommended**. If sent, it must equal the body `nonce`. Duplicate requests with the same nonce return the existing transfer (200) instead of creating a new one.
+
+### Signing Message Format (Critical for Integration)
+
+**The message you sign must use this exact format.** Using the old format will cause signature verification to fail.
+
+| Version | Format |
+|--------|--------|
+| **Old (deprecated)** | `{from}:{to}:{amount}:{mint}` |
+| **Current (required)** | **`{from}:{to}:{amount}:{mint}:{nonce}`** |
+
+- For **public** transfers: `amount` is the numeric amount (e.g. `1000000000`); for **confidential** use the literal `confidential`.
+- For **SOL**: use `SOL` for `mint`; for SPL tokens use the mint address.
+- **`nonce`** must be the same value sent in the JSON body (e.g. a UUID string).
+
+Example message (public SOL):  
+`7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU:RecipientPubkey...:1000000000:SOL:019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a`
+
 ### Example: Submit Public Transfer
 
 ```bash
 curl -X POST http://localhost:3000/transfer-requests \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a" \
   -d '{
     "from_address": "YOUR_WALLET_PUBKEY",
     "to_address": "RECIPIENT_PUBKEY",
@@ -735,9 +763,22 @@ curl -X POST http://localhost:3000/transfer-requests \
       "type": "public",
       "amount": 1000000000
     },
-    "signature": "BASE58_ED25519_SIGNATURE"
+    "token_mint": null,
+    "signature": "BASE58_ED25519_SIGNATURE_OVER_MESSAGE_WITH_NONCE",
+    "nonce": "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a"
   }'
 ```
+
+**Headers:** `Idempotency-Key` is supported and recommended; when present it must match the body `nonce`.
+
+---
+
+## Client Integration / SDK
+
+When integrating with the API (WASM, mobile, or server SDKs):
+
+- **Generate a unique nonce per request.** Use UUID v4 or (recommended) UUID v7 for time-ordered uniqueness. The nonce must be included in both the request body and the **signed message** (see [Signing Message Format](#signing-message-format-critical-for-integration)).
+- **Send the same nonce as `Idempotency-Key`** when retrying the same logical request (e.g. after a timeout) so the server returns the original response instead of creating a duplicate transfer.
 
 ---
 
@@ -747,7 +788,7 @@ The project includes CLI utilities for generating valid transfer requests with p
 
 ### generate_transfer_request
 
-Generates a complete, signed transfer request and outputs a ready-to-use curl command. Uses a dev keypair (or override via code). **For production, use client-side signing.**
+Generates a complete, signed transfer request and outputs a ready-to-use curl command. Uses a dev keypair (or override via code). **For production, use client-side signing.** The generated request includes a nonce and uses the current signing format (`{from}:{to}:{amount}:{mint}:{nonce}`).
 
 ```bash
 # Generate a public SOL transfer (1 SOL)
@@ -766,12 +807,14 @@ Generated Keypair:
 
 --------------------------------------------------
 
-Signing Message: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU:randomDest...:1000000000:SOL"
+Nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a"
+Signing Message: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU:randomDest...:1000000000:SOL:019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a"
 
 Generated curl command:
 
 curl -X POST 'http://localhost:3000/transfer-requests' \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a' \
   -d '{
     "from_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
     "to_address": "randomDestination...",
@@ -779,7 +822,9 @@ curl -X POST 'http://localhost:3000/transfer-requests' \
       "type": "public",
       "amount": 1000000000
     },
-    "signature": "BASE58_SIGNATURE..."
+    "token_mint": null,
+    "signature": "BASE58_SIGNATURE_OVER_MESSAGE_WITH_NONCE",
+    "nonce": "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a"
   }'
 ```
 
@@ -897,6 +942,7 @@ Ensure PostgreSQL is reachable (e.g. via `DATABASE_URL`). Use [docker-compose](d
 | 12 | **Smart Rent Recovery** (auto-close ZK context accounts) | Complete |
 | 13 | **Double-Spend Protection** (status-aware retry for JitoStateUnknown) | Complete |
 | 14 | **QuickNode Streams Integration** (dual-confirmation webhooks) | Complete |
+| 15 | **Request Uniqueness** — Replay protection via nonces; API idempotency via Idempotency-Key | Complete |
 
 ---
 
