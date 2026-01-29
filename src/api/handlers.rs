@@ -74,6 +74,13 @@ pub struct ApiDoc;
 /// Accepts a transfer for processing. The request is validated, screened
 /// for compliance, and queued for blockchain submission by background workers.
 ///
+/// **Replay Protection:** The `nonce` field is required and must be included in
+/// the signature message. Format: `{from}:{to}:{amount|confidential}:{mint|SOL}:{nonce}`
+///
+/// **Idempotency:** If the optional `Idempotency-Key` header is provided, it must
+/// match the body `nonce`. Duplicate requests with the same nonce return the
+/// existing request (HTTP 200) rather than creating a new one.
+///
 /// **Response indicates acceptance, not blockchain confirmation.**
 /// Poll `GET /transfer-requests/{id}` to track `blockchain_status` progression:
 /// - `pending_submission` → queued for worker
@@ -85,9 +92,12 @@ pub struct ApiDoc;
     path = "/transfer-requests",
     tag = "transfers",
     request_body = SubmitTransferRequest,
+    params(
+        ("Idempotency-Key" = Option<String>, Header, description = "Optional idempotency key (must match body nonce if provided)")
+    ),
     responses(
         (status = 200, description = "Transfer accepted for processing (blockchain_status will be 'pending_submission')", body = TransferRequest),
-        (status = 400, description = "Validation error - invalid request format", body = ErrorResponse),
+        (status = 400, description = "Validation error - invalid request format or nonce mismatch", body = ErrorResponse),
         (status = 429, description = "Rate limit exceeded", body = RateLimitResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse)
@@ -95,8 +105,40 @@ pub struct ApiDoc;
 )]
 pub async fn submit_transfer_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SubmitTransferRequest>,
 ) -> Result<Json<TransferRequest>, AppError> {
+    // Extract optional Idempotency-Key header
+    let idempotency_key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // If Idempotency-Key header is provided, it must match the body nonce
+    if let Some(ref key) = idempotency_key {
+        if key != &payload.nonce {
+            return Err(AppError::Validation(ValidationError::InvalidField {
+                field: "Idempotency-Key".to_string(),
+                message: "Header must match body nonce".to_string(),
+            }));
+        }
+    }
+
+    // Check for existing request with same nonce (idempotent return)
+    if let Some(existing) = state
+        .service
+        .find_by_nonce(&payload.from_address, &payload.nonce)
+        .await?
+    {
+        info!(
+            nonce = %payload.nonce,
+            existing_id = %existing.id,
+            "Idempotent return: existing request found for nonce"
+        );
+        return Ok(Json(existing));
+    }
+
+    // Proceed with normal submission
     let request = state.service.submit_transfer(&payload).await?;
     Ok(Json(request))
 }

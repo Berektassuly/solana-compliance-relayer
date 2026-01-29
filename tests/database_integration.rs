@@ -61,6 +61,7 @@ async fn test_create_and_get_transfer_request() {
         },
         token_mint: None,
         signature: "dummy_sig".to_string(),
+        nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6001".to_string(),
     };
 
     // Create item
@@ -103,6 +104,7 @@ async fn test_list_requests_pagination() {
             },
             token_mint: None,
             signature: "dummy_sig".to_string(),
+            nonce: format!("019470a4-7e7c-7d3e-8f1a-2b3c4d5e60{:02}", i),
         };
         client
             .submit_transfer(&request)
@@ -151,6 +153,7 @@ async fn test_blockchain_status_updates() {
         },
         token_mint: None,
         signature: "dummy_sig".to_string(),
+        nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6100".to_string(),
     };
     let created = client
         .submit_transfer(&request)
@@ -222,6 +225,7 @@ async fn test_get_pending_blockchain_requests() {
             },
             token_mint: None,
             signature: "dummy_sig".to_string(),
+            nonce: format!("019470a4-7e7c-7d3e-8f1a-2b3c4d5e62{:02}", i),
         };
         let item = client
             .submit_transfer(&request)
@@ -287,6 +291,7 @@ async fn test_increment_retry_count() {
         },
         token_mint: None,
         signature: "dummy_sig".to_string(),
+        nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6300".to_string(),
     };
     let created = client
         .submit_transfer(&request)

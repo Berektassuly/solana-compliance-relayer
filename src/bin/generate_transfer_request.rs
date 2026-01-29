@@ -51,11 +51,18 @@ fn main() {
             (TransferType::Public { amount }, None, amount.to_string())
         };
 
-    // Construct the message exactly as the server expects for signing:
-    // "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}"
-    let mint_str = token_mint.as_deref().unwrap_or("SOL");
-    let message = format!("{}:{}:{}:{}", from_pubkey, to_pubkey, amount_part, mint_str);
+    // Generate a unique nonce (UUID v7 format for time-ordering)
+    let nonce = uuid::Uuid::now_v7().to_string();
 
+    // Construct the message exactly as the server expects for signing:
+    // "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}:{nonce}"
+    let mint_str = token_mint.as_deref().unwrap_or("SOL");
+    let message = format!(
+        "{}:{}:{}:{}:{}",
+        from_pubkey, to_pubkey, amount_part, mint_str, nonce
+    );
+
+    println!("Nonce: \"{}\"", nonce);
     println!("Signing Message: \"{}\"", message);
 
     // 3. Sign the message
@@ -69,13 +76,14 @@ fn main() {
         transfer_details,
         token_mint,
         signature: signature_bs58.clone(),
+        nonce: nonce.clone(),
     };
 
-    // 5. Generate the CURL command
+    // 5. Generate the CURL command (with optional Idempotency-Key header)
     let json_body = serde_json::to_string_pretty(&request).unwrap();
     let curl_cmd = format!(
-        "curl -X POST 'http://localhost:3000/transfer-requests' \\\n  -H 'Content-Type: application/json' \\\n  -d '{}'",
-        json_body
+        "curl -X POST 'http://localhost:3000/transfer-requests' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Idempotency-Key: {}' \\\n  -d '{}'",
+        nonce, json_body
     );
 
     println!("\nGenerated curl command:\n");

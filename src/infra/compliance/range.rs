@@ -381,6 +381,7 @@ mod tests {
             },
             token_mint: None,
             signature: "dummy_sig".to_string(),
+            nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a".to_string(),
         };
         let result = provider.check_compliance(&request).await;
         assert_eq!(result.unwrap(), ComplianceStatus::Approved);
@@ -397,6 +398,7 @@ mod tests {
             },
             token_mint: None,
             signature: "dummy_sig".to_string(),
+            nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7b".to_string(),
         };
         let result = provider.check_compliance(&request).await;
         assert_eq!(result.unwrap(), ComplianceStatus::Rejected);

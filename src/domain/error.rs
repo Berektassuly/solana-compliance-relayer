@@ -87,6 +87,10 @@ pub enum ValidationError {
     InvalidAddress(String),
     #[error("Validation failed: {0}")]
     Multiple(String),
+    /// Duplicate request detected (nonce already used).
+    /// Returns the existing request to support idempotent behavior.
+    #[error("Duplicate request: nonce '{nonce}' has already been used")]
+    DuplicateRequest { nonce: String },
 }
 
 impl From<&str> for ValidationError {

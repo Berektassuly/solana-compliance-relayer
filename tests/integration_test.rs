@@ -41,8 +41,11 @@ fn create_signed_transfer_request(
 
     let transfer_details = TransferType::Public { amount };
 
-    // Create signing message: "{from_address}:{to_address}:{amount}:{SOL}"
-    let message = format!("{}:{}:{}:SOL", from_address, to_address, amount);
+    // Generate unique nonce for each request
+    let nonce = format!("019470a4-7e7c-7d3e-{:04x}-{:012x}", to_idx, amount);
+
+    // Create signing message: "{from_address}:{to_address}:{amount}:{SOL}:{nonce}"
+    let message = format!("{}:{}:{}:SOL:{}", from_address, to_address, amount, nonce);
     let signature = signing_key.sign(message.as_bytes());
     let signature_b58 = bs58::encode(signature.to_bytes()).into_string();
 
@@ -52,6 +55,7 @@ fn create_signed_transfer_request(
         transfer_details,
         token_mint: None,
         signature: signature_b58,
+        nonce,
     }
 }
 

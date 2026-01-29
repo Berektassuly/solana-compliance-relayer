@@ -118,6 +118,10 @@ impl PostgresClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(LastErrorType::None);
 
+        // Request Uniqueness fields (Replay Protection & Idempotency)
+        let nonce: Option<String> = row.try_get("nonce").ok().flatten();
+        let client_signature: Option<String> = row.try_get("client_signature").ok().flatten();
+
         Ok(TransferRequest {
             id: row.get("id"),
             from_address: row.get("from_address"),
@@ -138,6 +142,9 @@ impl PostgresClient {
             original_tx_signature,
             last_error_type,
             blockhash_used,
+            // Request Uniqueness fields
+            nonce,
+            client_signature,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -164,7 +171,8 @@ impl DatabaseClient for PostgresClient {
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
                    transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
-                   original_tx_signature, last_error_type, blockhash_used
+                   original_tx_signature, last_error_type, blockhash_used,
+                   nonce, client_signature
             FROM transfer_requests 
             WHERE id = $1
             "#,
@@ -180,7 +188,7 @@ impl DatabaseClient for PostgresClient {
         }
     }
 
-    #[instrument(skip(self, data), fields(from = %data.from_address, to = %data.to_address))]
+    #[instrument(skip(self, data), fields(from = %data.from_address, to = %data.to_address, nonce = %data.nonce))]
     async fn submit_transfer(
         &self,
         data: &SubmitTransferRequest,
@@ -214,15 +222,19 @@ impl DatabaseClient for PostgresClient {
             ),
         };
 
+        // Insert with nonce - uses UNIQUE constraint for idempotency
+        // ON CONFLICT handles race condition: if another request with same nonce
+        // was inserted between our check and insert, return the existing row
         sqlx::query(
             r#"
             INSERT INTO transfer_requests (
                 id, from_address, to_address, amount, token_mint,
                 compliance_status, blockchain_status, blockchain_retry_count,
                 created_at, updated_at,
-                transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
+                transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                nonce, client_signature
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(&id)
@@ -240,6 +252,8 @@ impl DatabaseClient for PostgresClient {
         .bind(equality_proof)
         .bind(ciphertext_validity_proof)
         .bind(range_proof)
+        .bind(&data.nonce)
+        .bind(&data.signature)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Database(DatabaseError::from(e)))?;
@@ -256,6 +270,13 @@ impl DatabaseClient for PostgresClient {
             blockchain_retry_count: 0,
             blockchain_last_error: None,
             blockchain_next_retry_at: None,
+            // Jito Double Spend Protection fields
+            original_tx_signature: None,
+            last_error_type: LastErrorType::None,
+            blockhash_used: None,
+            // Request Uniqueness fields
+            nonce: Some(data.nonce.clone()),
+            client_signature: Some(data.signature.clone()),
             created_at: now,
             updated_at: now,
         })
@@ -301,7 +322,8 @@ impl DatabaseClient for PostgresClient {
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
                            transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
-                           original_tx_signature, last_error_type, blockhash_used
+                           original_tx_signature, last_error_type, blockhash_used,
+                           nonce, client_signature
                     FROM transfer_requests
                     WHERE (created_at, id) < ($1, $2)
                     ORDER BY created_at DESC, id DESC
@@ -322,7 +344,8 @@ impl DatabaseClient for PostgresClient {
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
                            transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
-                           original_tx_signature, last_error_type, blockhash_used
+                           original_tx_signature, last_error_type, blockhash_used,
+                           nonce, client_signature
                     FROM transfer_requests
                     ORDER BY created_at DESC, id DESC
                     LIMIT $1
@@ -441,7 +464,8 @@ impl DatabaseClient for PostgresClient {
                       blockchain_status, blockchain_signature, blockchain_retry_count,
                       blockchain_last_error, blockchain_next_retry_at, created_at, updated_at,
                       transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
-                      original_tx_signature, last_error_type, blockhash_used
+                      original_tx_signature, last_error_type, blockhash_used,
+                      nonce, client_signature
             "#,
         )
         .bind(now)
@@ -484,12 +508,50 @@ impl DatabaseClient for PostgresClient {
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
                    transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
-                   original_tx_signature, last_error_type, blockhash_used
+                   original_tx_signature, last_error_type, blockhash_used,
+                   nonce, client_signature
             FROM transfer_requests 
             WHERE blockchain_signature = $1
             "#,
         )
         .bind(signature)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_transfer_request(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    // =========================================================================
+    // Request Uniqueness Methods (Replay Protection & Idempotency)
+    // =========================================================================
+
+    /// Find an existing request by from_address and nonce.
+    /// Used to check for duplicate requests (idempotency) and prevent replay attacks.
+    #[instrument(skip(self))]
+    async fn find_by_nonce(
+        &self,
+        from_address: &str,
+        nonce: &str,
+    ) -> Result<Option<TransferRequest>, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, from_address, to_address, amount, token_mint, compliance_status,
+                   blockchain_status, blockchain_signature, blockchain_retry_count,
+                   blockchain_last_error, blockchain_next_retry_at,
+                   created_at, updated_at,
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                   original_tx_signature, last_error_type, blockhash_used,
+                   nonce, client_signature
+            FROM transfer_requests 
+            WHERE from_address = $1 AND nonce = $2
+            "#,
+        )
+        .bind(from_address)
+        .bind(nonce)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;

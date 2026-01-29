@@ -59,24 +59,70 @@ impl AppService {
         }
     }
 
+    // =========================================================================
+    // Request Uniqueness Methods (Replay Protection & Idempotency)
+    // =========================================================================
+
+    /// Find an existing request by from_address and nonce.
+    /// Used to check for duplicate requests (idempotency) and prevent replay attacks.
+    ///
+    /// # Arguments
+    /// * `from_address` - The sender's wallet address
+    /// * `nonce` - The unique nonce from the request
+    ///
+    /// # Returns
+    /// - `Ok(Some(TransferRequest))` - Existing request found with this nonce
+    /// - `Ok(None)` - No existing request with this nonce
+    #[instrument(skip(self))]
+    pub async fn find_by_nonce(
+        &self,
+        from_address: &str,
+        nonce: &str,
+    ) -> Result<Option<TransferRequest>, AppError> {
+        self.db_client.find_by_nonce(from_address, nonce).await
+    }
+
     /// Submit a new transfer request for background processing.
     /// Validates, checks compliance, persists to database, and returns immediately.
     /// Blockchain submission is handled asynchronously by background workers.
-    #[instrument(skip(self, request), fields(from = %request.from_address, to = %request.to_address))]
+    ///
+    /// ## Replay Protection & Idempotency
+    /// The `nonce` field in the request must be unique per sender address.
+    /// - If a request with the same (from_address, nonce) already exists, the existing
+    ///   request is returned (idempotent behavior).
+    /// - The nonce is included in the signature message to prevent replay attacks:
+    ///   `{from}:{to}:{amount|confidential}:{mint|SOL}:{nonce}`
+    #[instrument(skip(self, request), fields(from = %request.from_address, to = %request.to_address, nonce = %request.nonce))]
     pub async fn submit_transfer(
         &self,
         request: &SubmitTransferRequest,
     ) -> Result<TransferRequest, AppError> {
-        // Cryptographic signature verification (MUST be first - before any state changes)
-        request.verify_signature().map_err(|e| {
-            warn!(from = %request.from_address, error = %e, "Signature verification failed");
-            e
-        })?;
-
+        // Validation first (includes nonce format validation)
         request.validate().map_err(|e| {
             warn!(error = %e, "Validation failed");
             AppError::Validation(ValidationError::Multiple(e.to_string()))
         })?;
+
+        // Cryptographic signature verification (now includes nonce in message)
+        // Format: "{from}:{to}:{amount|confidential}:{mint|SOL}:{nonce}"
+        request.verify_signature().map_err(|e| {
+            warn!(from = %request.from_address, nonce = %request.nonce, error = %e, "Signature verification failed");
+            e
+        })?;
+
+        // Defense in depth: Check for existing request with same nonce
+        // (Primary check is in API handler, this is secondary protection)
+        if let Some(existing) = self
+            .find_by_nonce(&request.from_address, &request.nonce)
+            .await?
+        {
+            info!(
+                nonce = %request.nonce,
+                existing_id = %existing.id,
+                "Idempotent return: existing request found for nonce (defense in depth)"
+            );
+            return Ok(existing);
+        }
 
         info!("Submitting new transfer request");
 

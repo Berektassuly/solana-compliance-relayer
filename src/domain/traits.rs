@@ -74,6 +74,29 @@ pub trait DatabaseClient: Send + Sync {
     ) -> Result<Option<TransferRequest>, AppError>;
 
     // =========================================================================
+    // Request Uniqueness Methods (Replay Protection & Idempotency)
+    // =========================================================================
+
+    /// Find an existing request by from_address and nonce.
+    /// Used to check for duplicate requests (idempotency) and prevent replay attacks.
+    ///
+    /// # Arguments
+    /// * `from_address` - The sender's wallet address (optional for broader lookups)
+    /// * `nonce` - The unique nonce from the request
+    ///
+    /// # Returns
+    /// - `Ok(Some(TransferRequest))` - Existing request found with this nonce
+    /// - `Ok(None)` - No existing request with this nonce
+    async fn find_by_nonce(
+        &self,
+        from_address: &str,
+        nonce: &str,
+    ) -> Result<Option<TransferRequest>, AppError> {
+        let _ = (from_address, nonce);
+        Ok(None)
+    }
+
+    // =========================================================================
     // Jito Double Spend Protection Methods
     // =========================================================================
 

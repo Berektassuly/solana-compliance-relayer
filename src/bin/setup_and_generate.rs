@@ -627,8 +627,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let from_pubkey = authority.pubkey();
     let to_pubkey = destination_wallet.pubkey();
 
-    // Create signing message
-    let message = format!("{}:{}:confidential:{}", from_pubkey, to_pubkey, mint_pubkey);
+    // Generate unique nonce (UUID v7 format)
+    let nonce = uuid::Uuid::now_v7().to_string();
+
+    // Create signing message with nonce
+    let message = format!(
+        "{}:{}:confidential:{}:{}",
+        from_pubkey, to_pubkey, mint_pubkey, nonce
+    );
+    println!("  Nonce: \"{}\"", nonce);
     println!("  Signing message: \"{}\"", message);
 
     let signature = signing_key.sign(message.as_bytes());
@@ -647,6 +654,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         transfer_details,
         token_mint: Some(mint_pubkey.to_string()),
         signature: signature_bs58,
+        nonce: nonce.clone(),
     };
 
     let json_body = serde_json::to_string_pretty(&request)?;
@@ -668,8 +676,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let curl_cmd = format!(
-        "curl -X POST 'http://localhost:3000/transfer-requests' \\\n  -H 'Content-Type: application/json' \\\n  -d '{}'",
-        json_body
+        "curl -X POST 'http://localhost:3000/transfer-requests' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Idempotency-Key: {}' \\\n  -d '{}'",
+        nonce, json_body
     );
 
     println!("{}", curl_cmd);

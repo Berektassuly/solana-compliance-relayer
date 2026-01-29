@@ -285,6 +285,19 @@ pub struct TransferRequest {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub blockhash_used: Option<String>,
 
+    // =========================================================================
+    // Request Uniqueness Fields (Replay Protection & Idempotency)
+    // =========================================================================
+    /// Unique nonce for replay protection. Included in the signed message
+    /// to prevent replay attacks. Also used as idempotency key for deduplication.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(example = "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a")]
+    pub nonce: Option<String>,
+
+    /// Original client signature stored for verification and auditing.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub client_signature: Option<String>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last update timestamp
@@ -311,9 +324,28 @@ impl TransferRequest {
             original_tx_signature: None,
             last_error_type: LastErrorType::None,
             blockhash_used: None,
+            // Request Uniqueness fields
+            nonce: None,
+            client_signature: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Create a new transfer request with nonce for replay protection
+    #[must_use]
+    pub fn with_nonce(
+        id: String,
+        from_address: String,
+        to_address: String,
+        amount: u64,
+        nonce: String,
+        client_signature: String,
+    ) -> Self {
+        let mut request = Self::new(id, from_address, to_address, amount);
+        request.nonce = Some(nonce);
+        request.client_signature = Some(client_signature);
+        request
     }
 
     /// Create a new token transfer request
@@ -368,11 +400,17 @@ pub struct SubmitTransferRequest {
     pub token_mint: Option<String>,
 
     /// Base58-encoded Ed25519 signature proving ownership of from_address.
-    /// The message format is: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}"
+    /// The message format is: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}:{nonce}"
     #[schema(
         example = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
     )]
     pub signature: String,
+
+    /// Unique nonce for replay protection (UUID v7 recommended).
+    /// Must be included in the signature message to prevent replay attacks.
+    /// Format: "{from}:{to}:{amount|confidential}:{mint|SOL}:{nonce}"
+    #[schema(example = "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a")]
+    pub nonce: String,
 }
 
 impl Validate for SubmitTransferRequest {
@@ -389,6 +427,30 @@ impl Validate for SubmitTransferRequest {
             errors.add(
                 "to_address",
                 validator::ValidationError::new("To address is required"),
+            );
+        }
+
+        // Nonce validation for replay protection
+        if self.nonce.is_empty() {
+            errors.add(
+                "nonce",
+                validator::ValidationError::new("Nonce is required for replay protection"),
+            );
+        } else if self.nonce.len() < 32 || self.nonce.len() > 64 {
+            errors.add(
+                "nonce",
+                validator::ValidationError::new("Nonce must be 32-64 characters (UUID format)"),
+            );
+        } else if !self
+            .nonce
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            errors.add(
+                "nonce",
+                validator::ValidationError::new(
+                    "Nonce must be alphanumeric with optional hyphens (UUID format)",
+                ),
             );
         }
 
@@ -505,7 +567,11 @@ impl SubmitTransferRequest {
     }
 
     /// Create the deterministic message for signing.
-    /// Format: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}"
+    /// Format: "{from_address}:{to_address}:{amount|confidential}:{token_mint|SOL}:{nonce}"
+    ///
+    /// The nonce MUST be included in the message to prevent replay attacks.
+    /// Same parameters without a unique nonce would produce the same message,
+    /// allowing an attacker to replay the signed request indefinitely.
     #[must_use]
     pub fn create_signing_message(&self) -> Vec<u8> {
         let amount_part = match &self.transfer_details {
@@ -514,20 +580,27 @@ impl SubmitTransferRequest {
         };
         let mint_part = self.token_mint.as_deref().unwrap_or("SOL");
         format!(
-            "{}:{}:{}:{}",
-            self.from_address, self.to_address, amount_part, mint_part
+            "{}:{}:{}:{}:{}",
+            self.from_address, self.to_address, amount_part, mint_part, self.nonce
         )
         .into_bytes()
     }
 
     #[must_use]
-    pub fn new(from_address: String, to_address: String, amount: u64, signature: String) -> Self {
+    pub fn new(
+        from_address: String,
+        to_address: String,
+        amount: u64,
+        signature: String,
+        nonce: String,
+    ) -> Self {
         Self {
             from_address,
             to_address,
             transfer_details: TransferType::Public { amount },
             token_mint: None,
             signature,
+            nonce,
         }
     }
 
@@ -539,6 +612,7 @@ impl SubmitTransferRequest {
         amount: u64,
         token_mint: String,
         signature: String,
+        nonce: String,
     ) -> Self {
         Self {
             from_address,
@@ -546,6 +620,7 @@ impl SubmitTransferRequest {
             transfer_details: TransferType::Public { amount },
             token_mint: Some(token_mint),
             signature,
+            nonce,
         }
     }
 
@@ -561,6 +636,7 @@ impl SubmitTransferRequest {
         range_proof: String,
         token_mint: String,
         signature: String,
+        nonce: String,
     ) -> Self {
         Self {
             from_address,
@@ -573,6 +649,7 @@ impl SubmitTransferRequest {
             },
             token_mint: Some(token_mint),
             signature,
+            nonce,
         }
     }
 
@@ -945,12 +1022,15 @@ mod tests {
 
     #[test]
     fn test_submit_transfer_request_validation() {
+        let valid_nonce = "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a".to_string();
+
         // Valid request (1 SOL in lamports)
         let req = SubmitTransferRequest::new(
             "From".to_string(),
             "To".to_string(),
             1_000_000_000,
             "sig".to_string(),
+            valid_nonce.clone(),
         );
         assert!(req.validate().is_ok());
 
@@ -960,6 +1040,7 @@ mod tests {
             "To".to_string(),
             1_000_000_000,
             "sig".to_string(),
+            valid_nonce.clone(),
         );
         assert!(req.validate().is_err());
 
@@ -969,12 +1050,48 @@ mod tests {
             "".to_string(),
             1_000_000_000,
             "sig".to_string(),
+            valid_nonce.clone(),
         );
         assert!(req.validate().is_err());
 
         // Invalid Amount (zero)
-        let req =
-            SubmitTransferRequest::new("From".to_string(), "To".to_string(), 0, "sig".to_string());
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "To".to_string(),
+            0,
+            "sig".to_string(),
+            valid_nonce.clone(),
+        );
+        assert!(req.validate().is_err());
+
+        // Invalid Nonce (empty)
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "To".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+            "".to_string(),
+        );
+        assert!(req.validate().is_err());
+
+        // Invalid Nonce (too short)
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "To".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+            "short".to_string(),
+        );
+        assert!(req.validate().is_err());
+
+        // Invalid Nonce (invalid characters)
+        let req = SubmitTransferRequest::new(
+            "From".to_string(),
+            "To".to_string(),
+            1_000_000_000,
+            "sig".to_string(),
+            "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7!".to_string(),
+        );
         assert!(req.validate().is_err());
 
         // Valid Confidential Request
@@ -987,6 +1104,7 @@ mod tests {
             "range".to_string(),
             "mint".to_string(),
             "sig".to_string(),
+            valid_nonce.clone(),
         );
         assert!(req.validate().is_ok());
 
@@ -1000,6 +1118,7 @@ mod tests {
             "range".to_string(),
             "mint".to_string(),
             "sig".to_string(),
+            valid_nonce.clone(),
         );
         assert!(req.validate().is_err());
     }
