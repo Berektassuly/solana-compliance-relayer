@@ -7,6 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Solana](https://img.shields.io/badge/Solana-9945FF?style=for-the-badge&logo=solana&logoColor=white)](https://solana.com/)
+[![Jito MEV Protection](https://img.shields.io/badge/Jito-MEV%20Protected-10B981?style=for-the-badge&logo=shield&logoColor=white)](https://www.jito.wtf/)
 [![Helius](https://img.shields.io/badge/Helius-FF5733?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PC9zdmc+&logoColor=white)](https://helius.dev/)
 [![QuickNode](https://img.shields.io/badge/QuickNode-195AD2?style=for-the-badge&logo=quicknode&logoColor=white)](https://www.quicknode.com/)
 [![Range Protocol](https://img.shields.io/badge/Range%20Protocol-6D28D9?style=for-the-badge&logo=shield&logoColor=white)](https://www.rangeprotocol.com/)
@@ -24,6 +25,7 @@
 - [Key Features](#key-features)
 - [Technical Stack](#technical-stack)
 - [RPC Provider Strategy](#rpc-provider-strategy)
+- [Jito Bundle Integration (MEV Protection)](#jito-bundle-integration-mev-protection)
 - [Transaction Lifecycle](#transaction-lifecycle)
 - [Getting Started](#getting-started)
 - [Environment Configuration](#environment-configuration)
@@ -200,6 +202,7 @@ sequenceDiagram
 | Feature | Description |
 |-----------|-------------|
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
+| **MEV Protection (Jito Bundles)** | Private transaction submission via Jito block builders, bypassing the public mempool |
 | **Real-Time Transaction Monitoring** | Frontend polls API every 5 seconds with TanStack Query |
 | **Pre-Flight Risk Check** | `POST /risk-check` aggregates blocklist, Range Protocol, and Helius DAS data with 1-hour caching |
 | **Internal Blocklist Manager** | Thread-safe DashMap cache with PostgreSQL persistence for fast local address screening |
@@ -207,7 +210,7 @@ sequenceDiagram
 | **Public & Confidential Transfers** | Supports standard SOL/SPL and Token-2022 ZK confidential transfers |
 | **Resilient Background Worker** | Exponential backoff retries (up to 10 attempts, max 5-minute delay) |
 | **Helius Webhook Integration** | Real-time finalization callbacks move transactions from `submitted` -> `confirmed` |
-| **Provider Strategy Pattern** | Auto-detects Helius/QuickNode for premium features (priority fees, DAS) |
+| **Provider Strategy Pattern** | Auto-detects Helius/QuickNode for premium features (priority fees, DAS, Jito) |
 | **Rate Limiting** | Governor-based middleware with configurable RPS and burst limits |
 | **OpenAPI Documentation** | Auto-generated Swagger UI at `/swagger-ui` |
 
@@ -267,14 +270,14 @@ The relayer implements a **Provider Strategy Pattern** that auto-detects the RPC
 | Provider | Detection | Features |
 |----------|-----------|----------|
 | **Helius** | URL contains `helius-rpc.com` | Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks, Enhanced Webhooks |
-| **QuickNode** | URL contains `quiknode.pro` or `quicknode.com` | Priority fee estimation via `qn_estimatePriorityFees`, Privacy Health Check service, Ghost Mode (Jito bundles) |
+| **QuickNode** | URL contains `quiknode.pro` or `quicknode.com` | Priority fee estimation via `qn_estimatePriorityFees`, Privacy Health Check service, **Jito Bundle Submission (MEV Protection)** |
 | **Standard** | Any other RPC | Static fallback fee strategy (5000 micro-lamports) |
 
 ### QuickNode-Specific Features
 
 - **Priority Fee Estimation**: Uses the `qn_estimatePriorityFees` RPC method to fetch real-time fee recommendations
 - **Privacy Health Check Service**: Monitors token activity to recommend optimal submission timing for confidential transfers
-- **Ghost Mode Integration**: Scaffolded for private transaction submission via Jito bundles
+- **Jito Bundle Submission (Ghost Mode)**: MEV-protected private transaction submission via Jito block builders
 
 ### Configuration Examples
 
@@ -282,12 +285,73 @@ The relayer implements a **Provider Strategy Pattern** that auto-detects the RPC
 # Helius (recommended for webhooks)
 SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
 
-# QuickNode (recommended for privacy features)
+# QuickNode (recommended for MEV protection + privacy features)
 SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
 
 # Standard RPC (development only)
 SOLANA_RPC_URL=https://api.devnet.solana.com
 ```
+
+---
+
+## Jito Bundle Integration (MEV Protection)
+
+When using QuickNode with Jito bundles enabled, transactions are submitted privately to Jito block builders, **bypassing the public mempool**. This provides protection against:
+
+- **Frontrunning**: Attackers cannot see your transaction before it's included
+- **Sandwich Attacks**: No opportunity to place transactions around yours
+- **MEV Extraction**: Your transaction value stays with you
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Standard Submission (Public Mempool)                 │
+│  Transaction → Public Mempool → Visible to MEV Bots → Block Inclusion   │
+│                           VULNERABLE TO ATTACKS                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Jito Bundle Submission (Private)                     │
+│  Transaction + Tip → Jito Block Builder → Direct Block Inclusion        │
+│                           MEV PROTECTED                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Automatic Tip Injection
+
+When Jito is enabled, the relayer **automatically appends a tip instruction** to each transaction before signing:
+
+1. A random Jito tip account is selected (from 8 official accounts) to reduce contention
+2. A SOL transfer instruction is added as the **last instruction** in the transaction
+3. The tip amount is configurable via `JITO_TIP_LAMPORTS` (default: 10,000 = 0.00001 SOL)
+
+### Fail-Safe Design
+
+The Jito integration implements a strict **no-leak guarantee**:
+
+- If Jito submission fails, the transaction is **NOT** sent to the public mempool
+- This prevents accidental MEV exposure on Jito failures
+- Failed submissions return an error for upstream retry logic
+
+### Configuration
+
+```env
+# Enable Jito bundle submission (requires QuickNode with "Lil' JIT" add-on)
+USE_JITO_BUNDLES=true
+
+# Tip amount in lamports (minimum: 1,000, recommended: 10,000-50,000)
+JITO_TIP_LAMPORTS=10000
+
+# Optional: Specify region for lower latency (ny, amsterdam, frankfurt, tokyo)
+JITO_REGION=ny
+```
+
+### Requirements
+
+1. **QuickNode RPC endpoint** with the ["Lil' JIT - JITO Bundles and transactions"](https://marketplace.quicknode.com/add-on/lil-jit-jito-bundles-and-transactions) add-on enabled
+2. `USE_JITO_BUNDLES=true` in environment
+3. Sufficient SOL balance for transaction fees + tip
 
 ---
 
@@ -453,15 +517,23 @@ Create a `.env` file in the project root. See [`.env.example`](.env.example) for
 | `CORS_ALLOWED_ORIGINS` | Comma-separated CORS origins; `localhost:3000` and `localhost:3001` always allowed |
 | `RUST_LOG` | Log level (e.g. `info,tower_http=debug,sqlx=warn`) |
 
-> **Note:** Priority fees and DAS are auto-detected from `SOLANA_RPC_URL` (Helius/QuickNode). No separate `HELIUS_API_KEY` is used.
+### Jito MEV Protection Variables (QuickNode only)
 
-### Example Production Configuration
+| Variable | Description |
+|----------|-------------|
+| `USE_JITO_BUNDLES` | Enable Jito bundle submission for MEV protection (default: `false`) |
+| `JITO_TIP_LAMPORTS` | Tip amount in lamports for Jito block builders (default: `10000` = 0.00001 SOL) |
+| `JITO_REGION` | Optional region for lower latency: `ny`, `amsterdam`, `frankfurt`, `tokyo` (default: auto) |
+
+> **Note:** Priority fees and DAS are auto-detected from `SOLANA_RPC_URL` (Helius/QuickNode). Jito bundles require QuickNode with the "Lil' JIT" add-on.
+
+### Example Production Configuration (Helius)
 
 ```env
 # Database
 DATABASE_URL=postgres://user:pass@host:5432/compliance_relayer
 
-# Blockchain (Helius)
+# Blockchain (Helius - recommended for webhooks)
 SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
 ISSUER_PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
 HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
@@ -469,7 +541,6 @@ HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 # Compliance
 RANGE_API_KEY=YOUR_RANGE_KEY
 RANGE_RISK_THRESHOLD=6
-# RANGE_API_URL=https://api.range.org/v1
 
 # Server
 HOST=0.0.0.0
@@ -484,7 +555,44 @@ ENABLE_PRIVACY_CHECKS=true
 RATE_LIMIT_RPS=10
 RATE_LIMIT_BURST=20
 
-# CORS (optional)
+# CORS
+CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
+```
+
+### Example Production Configuration (QuickNode + Jito MEV Protection)
+
+```env
+# Database
+DATABASE_URL=postgres://user:pass@host:5432/compliance_relayer
+
+# Blockchain (QuickNode - recommended for MEV protection)
+SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
+ISSUER_PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
+QUICKNODE_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
+
+# Jito MEV Protection (requires QuickNode "Lil' JIT" add-on)
+USE_JITO_BUNDLES=true
+JITO_TIP_LAMPORTS=10000
+JITO_REGION=ny
+
+# Compliance
+RANGE_API_KEY=YOUR_RANGE_KEY
+RANGE_RISK_THRESHOLD=6
+
+# Server
+HOST=0.0.0.0
+PORT=3000
+
+# Features
+ENABLE_RATE_LIMITING=true
+ENABLE_BACKGROUND_WORKER=true
+ENABLE_PRIVACY_CHECKS=true
+
+# Rate limiting
+RATE_LIMIT_RPS=10
+RATE_LIMIT_BURST=20
+
+# CORS
 CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 ```
 
@@ -694,6 +802,7 @@ Ensure PostgreSQL is reachable (e.g. via `DATABASE_URL`). Use [docker-compose](d
 | 8 | Internal Blocklist Manager with admin API | Complete |
 | 9 | Pre-Flight Risk Check with persistent caching | Complete |
 | 10 | `setup_and_generate` CLI for zk-edge confidential transfers | Complete |
+| 11 | **Jito Bundle Integration (MEV Protection)** | Complete |
 
 ---
 
