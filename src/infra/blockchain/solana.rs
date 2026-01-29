@@ -1867,6 +1867,106 @@ impl BlockchainClient for RpcBlockchainClient {
             }
         }
     }
+
+    // =========================================================================
+    // Jito Double Spend Protection Methods
+    // =========================================================================
+
+    /// Query the status of a transaction by its signature.
+    /// Used to verify if an original transaction was processed before retrying
+    /// after a JitoStateUnknown error.
+    #[instrument(skip(self))]
+    async fn get_signature_status(
+        &self,
+        signature: &str,
+    ) -> Result<Option<crate::domain::TransactionStatus>, AppError> {
+        use crate::domain::TransactionStatus;
+
+        let params = serde_json::json!([[signature], {"searchTransactionHistory": true}]);
+        let result: SignatureStatusResult = self.rpc_call("getSignatureStatuses", params).await?;
+
+        match result.value.first() {
+            Some(Some(status)) => {
+                // Check if transaction errored
+                if let Some(ref err) = status.err {
+                    return Ok(Some(TransactionStatus::Failed(format!("{:?}", err))));
+                }
+
+                // Check confirmation status
+                match status.confirmation_status.as_deref() {
+                    Some("finalized") => Ok(Some(TransactionStatus::Finalized)),
+                    Some("confirmed") => Ok(Some(TransactionStatus::Confirmed)),
+                    // Transaction is still processing or unknown status
+                    _ => Ok(None),
+                }
+            }
+            // Transaction not found
+            _ => Ok(None),
+        }
+    }
+
+    /// Check if a blockhash is still valid (not expired).
+    /// Blockhashes typically expire after ~150 slots (~1-2 minutes).
+    #[instrument(skip(self))]
+    async fn is_blockhash_valid(&self, blockhash: &str) -> Result<bool, AppError> {
+        // Use the SDK client if available for accurate blockhash validation
+        if let Some(sdk_client) = &self.sdk_client {
+            use solana_hash::Hash;
+            use std::str::FromStr;
+
+            let hash = Hash::from_str(blockhash).map_err(|e| {
+                AppError::Validation(crate::domain::ValidationError::InvalidField {
+                    field: "blockhash".to_string(),
+                    message: format!("Invalid blockhash format: {}", e),
+                })
+            })?;
+
+            let is_valid = sdk_client
+                .is_blockhash_valid(&hash, CommitmentConfig::confirmed())
+                .await
+                .map_err(map_solana_client_error)?;
+
+            debug!(
+                blockhash = %blockhash,
+                is_valid = %is_valid,
+                "Checked blockhash validity"
+            );
+
+            return Ok(is_valid);
+        }
+
+        // Fallback: Use RPC method directly
+        // The `isBlockhashValid` RPC method returns whether the blockhash is still valid
+        let params = serde_json::json!([blockhash, {"commitment": "confirmed"}]);
+
+        #[derive(Debug, Deserialize)]
+        struct IsValidResult {
+            value: bool,
+        }
+
+        match self
+            .rpc_call::<IsValidResult>("isBlockhashValid", params)
+            .await
+        {
+            Ok(result) => {
+                debug!(
+                    blockhash = %blockhash,
+                    is_valid = %result.value,
+                    "Checked blockhash validity via RPC"
+                );
+                Ok(result.value)
+            }
+            Err(e) => {
+                warn!(
+                    blockhash = %blockhash,
+                    error = %e,
+                    "Failed to check blockhash validity, assuming expired"
+                );
+                // On error, assume expired (safe to retry with new blockhash)
+                Ok(false)
+            }
+        }
+    }
 }
 
 /// Map Solana client errors to our AppError types

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use super::error::AppError;
 use super::types::{
-    BlockchainStatus, ComplianceStatus, PaginatedResponse, SubmitTransferRequest, TransferRequest,
-    WalletRiskProfile,
+    BlockchainStatus, ComplianceStatus, LastErrorType, PaginatedResponse, SubmitTransferRequest,
+    TransactionStatus, TransferRequest, WalletRiskProfile,
 };
 use chrono::{DateTime, Utc};
 
@@ -72,6 +72,23 @@ pub trait DatabaseClient: Send + Sync {
         &self,
         signature: &str,
     ) -> Result<Option<TransferRequest>, AppError>;
+
+    // =========================================================================
+    // Jito Double Spend Protection Methods
+    // =========================================================================
+
+    /// Update Jito tracking fields for a transfer request.
+    /// Used to store the original signature, error type, and blockhash for safe retry logic.
+    async fn update_jito_tracking(
+        &self,
+        id: &str,
+        original_tx_signature: Option<&str>,
+        last_error_type: LastErrorType,
+        blockhash_used: Option<&str>,
+    ) -> Result<(), AppError> {
+        let _ = (id, original_tx_signature, last_error_type, blockhash_used);
+        Ok(())
+    }
 
     // =========================================================================
     // Risk Profile Methods (for pre-flight compliance screening cache)
@@ -206,6 +223,69 @@ pub trait BlockchainClient: Send + Sync {
         let _ = owner;
         // Default: skip check for providers without DAS support
         Ok(true)
+    }
+
+    // =========================================================================
+    // Jito Double Spend Protection Methods
+    // =========================================================================
+
+    /// Query the status of a transaction by its signature.
+    /// Used to verify if an original transaction was processed before retrying
+    /// after a JitoStateUnknown error.
+    ///
+    /// # Returns
+    /// - `Ok(Some(TransactionStatus::Confirmed))` - Transaction confirmed
+    /// - `Ok(Some(TransactionStatus::Finalized))` - Transaction finalized
+    /// - `Ok(Some(TransactionStatus::Failed(msg)))` - Transaction failed on-chain
+    /// - `Ok(None)` - Transaction not found (may still be processing or never submitted)
+    async fn get_signature_status(
+        &self,
+        signature: &str,
+    ) -> Result<Option<TransactionStatus>, AppError> {
+        let _ = signature;
+        Err(AppError::NotSupported(
+            "get_signature_status not implemented".to_string(),
+        ))
+    }
+
+    /// Check if a blockhash is still valid (not expired).
+    /// Blockhashes typically expire after ~150 slots (~1-2 minutes).
+    ///
+    /// If the blockhash is expired and the original transaction was not found,
+    /// it's safe to retry with a new blockhash (the original tx cannot be
+    /// processed anymore).
+    ///
+    /// # Returns
+    /// - `Ok(true)` - Blockhash is still valid
+    /// - `Ok(false)` - Blockhash has expired
+    async fn is_blockhash_valid(&self, blockhash: &str) -> Result<bool, AppError> {
+        let _ = blockhash;
+        Err(AppError::NotSupported(
+            "is_blockhash_valid not implemented".to_string(),
+        ))
+    }
+
+    /// Classify a blockchain error into LastErrorType for retry logic.
+    /// This helper method categorizes errors to determine safe retry strategies.
+    fn classify_error(&self, error: &AppError) -> LastErrorType {
+        match error {
+            AppError::Blockchain(crate::domain::BlockchainError::JitoStateUnknown(_)) => {
+                LastErrorType::JitoStateUnknown
+            }
+            AppError::Blockchain(crate::domain::BlockchainError::JitoBundleFailed(_)) => {
+                LastErrorType::JitoBundleFailed
+            }
+            AppError::Blockchain(crate::domain::BlockchainError::TransactionFailed(_)) => {
+                LastErrorType::TransactionFailed
+            }
+            AppError::Blockchain(
+                crate::domain::BlockchainError::Connection(_)
+                | crate::domain::BlockchainError::Timeout(_)
+                | crate::domain::BlockchainError::RpcError(_),
+            ) => LastErrorType::NetworkError,
+            AppError::Validation(_) => LastErrorType::ValidationError,
+            _ => LastErrorType::TransactionFailed,
+        }
     }
 }
 

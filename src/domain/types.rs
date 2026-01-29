@@ -104,6 +104,93 @@ impl std::fmt::Display for ComplianceStatus {
     }
 }
 
+// ============================================================================
+// Jito Double Spend Protection Types
+// ============================================================================
+
+/// Classification of the last error encountered during blockchain submission.
+/// Used for smart retry logic to prevent double-spend on JitoStateUnknown.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LastErrorType {
+    /// No error or initial state
+    #[default]
+    None,
+    /// Jito bundle state unknown - DO NOT retry with new blockhash without checking status first.
+    /// This occurs on timeouts, server errors, or ambiguous responses where the bundle
+    /// may have been processed.
+    JitoStateUnknown,
+    /// Jito bundle definitively failed - safe to retry with new blockhash.
+    /// The bundle was rejected/dropped and was NOT processed.
+    JitoBundleFailed,
+    /// Transaction failed on-chain - safe to retry with new blockhash.
+    TransactionFailed,
+    /// Network/connection error - safe to retry with new blockhash.
+    NetworkError,
+    /// Validation error - should not retry automatically.
+    ValidationError,
+}
+
+impl LastErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::JitoStateUnknown => "jito_state_unknown",
+            Self::JitoBundleFailed => "jito_bundle_failed",
+            Self::TransactionFailed => "transaction_failed",
+            Self::NetworkError => "network_error",
+            Self::ValidationError => "validation_error",
+        }
+    }
+
+    /// Check if this error type requires status verification before retry
+    pub fn requires_status_check(&self) -> bool {
+        matches!(self, Self::JitoStateUnknown)
+    }
+
+    /// Check if this error type is safe to retry with a new blockhash
+    pub fn safe_to_retry_new_blockhash(&self) -> bool {
+        matches!(
+            self,
+            Self::None | Self::JitoBundleFailed | Self::TransactionFailed | Self::NetworkError
+        )
+    }
+}
+
+impl std::str::FromStr for LastErrorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "jito_state_unknown" => Ok(Self::JitoStateUnknown),
+            "jito_bundle_failed" => Ok(Self::JitoBundleFailed),
+            "transaction_failed" => Ok(Self::TransactionFailed),
+            "network_error" => Ok(Self::NetworkError),
+            "validation_error" => Ok(Self::ValidationError),
+            _ => Err(format!("Invalid last error type: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for LastErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Transaction status from blockchain query.
+/// Used to determine if an original transaction was processed before retrying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// Transaction is confirmed (1+ confirmations)
+    Confirmed,
+    /// Transaction is finalized (max confirmations)
+    Finalized,
+    /// Transaction failed with an error
+    Failed(String),
+}
+
 /// Type of transfer and associated data
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -179,6 +266,25 @@ pub struct TransferRequest {
     pub blockchain_last_error: Option<String>,
     /// Next scheduled retry time
     pub blockchain_next_retry_at: Option<DateTime<Utc>>,
+
+    // =========================================================================
+    // Jito Double Spend Protection Fields
+    // =========================================================================
+    /// Original transaction signature stored on first submission.
+    /// Used to check status before retry when last_error_type is JitoStateUnknown.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub original_tx_signature: Option<String>,
+
+    /// Classification of the last error encountered during blockchain submission.
+    /// Determines retry strategy: JitoStateUnknown requires status check before retry.
+    #[serde(default)]
+    pub last_error_type: LastErrorType,
+
+    /// Blockhash used in the last transaction attempt.
+    /// Used to determine if blockhash has expired (>150 slots = safe to retry with new blockhash).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blockhash_used: Option<String>,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last update timestamp
@@ -201,6 +307,10 @@ impl TransferRequest {
             blockchain_retry_count: 0,
             blockchain_last_error: None,
             blockchain_next_retry_at: None,
+            // Jito Double Spend Protection fields
+            original_tx_signature: None,
+            last_error_type: LastErrorType::None,
+            blockhash_used: None,
             created_at: now,
             updated_at: now,
         }

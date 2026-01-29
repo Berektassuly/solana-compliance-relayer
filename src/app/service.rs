@@ -6,9 +6,10 @@ use tracing::{error, info, instrument, warn};
 use validator::Validate;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
-    HealthStatus, HeliusTransaction, PaginatedResponse, QuickNodeWebhookEvent,
-    SubmitTransferRequest, TransferRequest, ValidationError,
+    AppError, BlockchainClient, BlockchainError, BlockchainStatus, ComplianceStatus,
+    DatabaseClient, HealthResponse, HealthStatus, HeliusTransaction, LastErrorType,
+    PaginatedResponse, QuickNodeWebhookEvent, SubmitTransferRequest, TransactionStatus,
+    TransferRequest, ValidationError,
 };
 use crate::infra::BlocklistManager;
 
@@ -338,6 +339,74 @@ impl AppService {
             }));
         }
 
+        // =====================================================================
+        // JITO DOUBLE SPEND PROTECTION
+        // =====================================================================
+        // If the previous error was JitoStateUnknown, check if the original
+        // transaction was processed before attempting a retry.
+        // =====================================================================
+
+        if transfer_request.last_error_type == LastErrorType::JitoStateUnknown {
+            if let Some(ref original_sig) = transfer_request.original_tx_signature {
+                info!(
+                    id = %transfer_request.id,
+                    original_sig = %original_sig,
+                    "Checking original transaction status before manual retry (JitoStateUnknown)"
+                );
+
+                match self
+                    .blockchain_client
+                    .get_signature_status(original_sig)
+                    .await
+                {
+                    Ok(Some(TransactionStatus::Confirmed | TransactionStatus::Finalized)) => {
+                        // Original transaction landed! Update as success, no retry needed
+                        info!(
+                            id = %transfer_request.id,
+                            original_sig = %original_sig,
+                            "Original transaction confirmed - marking as success (prevented double-spend)"
+                        );
+                        self.db_client
+                            .update_blockchain_status(
+                                id,
+                                BlockchainStatus::Submitted,
+                                Some(original_sig),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        self.db_client
+                            .update_jito_tracking(id, None, LastErrorType::None, None)
+                            .await?;
+
+                        let mut updated_request = transfer_request;
+                        updated_request.blockchain_status = BlockchainStatus::Submitted;
+                        updated_request.blockchain_signature = Some(original_sig.clone());
+                        updated_request.blockchain_last_error = None;
+                        updated_request.last_error_type = LastErrorType::None;
+                        return Ok(updated_request);
+                    }
+                    Ok(Some(TransactionStatus::Failed(_))) | Ok(None) => {
+                        // Failed or not found - safe to retry with new blockhash
+                        info!(
+                            id = %transfer_request.id,
+                            "Original tx not confirmed - proceeding with retry"
+                        );
+                        self.db_client
+                            .update_jito_tracking(id, None, LastErrorType::None, None)
+                            .await?;
+                    }
+                    Err(e) => {
+                        warn!(
+                            id = %transfer_request.id,
+                            error = %e,
+                            "Failed to check original tx status, proceeding with retry"
+                        );
+                    }
+                }
+            }
+        }
+
         match self
             .blockchain_client
             .submit_transaction(&transfer_request)
@@ -354,15 +423,20 @@ impl AppService {
                         None,
                     )
                     .await?;
+                self.db_client
+                    .update_jito_tracking(id, None, LastErrorType::None, None)
+                    .await?;
                 let mut updated_request = transfer_request;
                 updated_request.blockchain_status = BlockchainStatus::Submitted;
                 updated_request.blockchain_signature = Some(signature);
                 updated_request.blockchain_last_error = None;
                 updated_request.blockchain_next_retry_at = None;
+                updated_request.last_error_type = LastErrorType::None;
                 Ok(updated_request)
             }
             Err(e) => {
-                warn!(id = %transfer_request.id, error = ?e, "Retry submission failed");
+                let error_type = self.blockchain_client.classify_error(&e);
+                warn!(id = %transfer_request.id, error = ?e, error_type = %error_type, "Retry submission failed");
                 let retry_count = self.db_client.increment_retry_count(id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)
@@ -376,6 +450,12 @@ impl AppService {
 
                 self.db_client
                     .update_blockchain_status(id, status, None, Some(&e.to_string()), next_retry)
+                    .await?;
+
+                // Store Jito tracking info
+                let original_sig = transfer_request.blockchain_signature.as_deref();
+                self.db_client
+                    .update_jito_tracking(id, original_sig, error_type, None)
                     .await?;
 
                 Err(e)
@@ -407,12 +487,138 @@ impl AppService {
         Ok(count)
     }
 
-    /// Process a single pending submission
+    /// Process a single pending submission with Jito Double Spend Protection.
+    ///
+    /// This method implements the Jito Double Spend Protection:
+    /// - Before retrying after a JitoStateUnknown error, check if the original
+    ///   transaction was processed to prevent double-spend.
+    /// - Track the error type to enable smart retry logic.
     async fn process_single_submission(&self, request: &TransferRequest) -> Result<(), AppError> {
         // Defense in depth: Skip non-approved requests (should be filtered at DB level already)
         if request.compliance_status != ComplianceStatus::Approved {
             warn!(id = %request.id, status = ?request.compliance_status, "Skipping non-approved request");
             return Ok(());
+        }
+
+        // =====================================================================
+        // JITO DOUBLE SPEND PROTECTION
+        // =====================================================================
+        // If the previous error was JitoStateUnknown, we MUST check if the
+        // original transaction was processed before attempting a retry.
+        // Otherwise, we risk double-spending if the original tx actually landed.
+        // =====================================================================
+
+        if request.last_error_type == LastErrorType::JitoStateUnknown {
+            if let Some(ref original_sig) = request.original_tx_signature {
+                info!(
+                    id = %request.id,
+                    original_sig = %original_sig,
+                    "Checking original transaction status before retry (JitoStateUnknown)"
+                );
+
+                // Query blockchain for transaction status
+                match self
+                    .blockchain_client
+                    .get_signature_status(original_sig)
+                    .await
+                {
+                    Ok(Some(TransactionStatus::Confirmed | TransactionStatus::Finalized)) => {
+                        // Original transaction landed! Update as success, no retry needed
+                        info!(
+                            id = %request.id,
+                            original_sig = %original_sig,
+                            "Original transaction confirmed - marking as success (prevented double-spend)"
+                        );
+                        self.db_client
+                            .update_blockchain_status(
+                                &request.id,
+                                BlockchainStatus::Submitted,
+                                Some(original_sig),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        // Clear error type since tx succeeded
+                        self.db_client
+                            .update_jito_tracking(&request.id, None, LastErrorType::None, None)
+                            .await?;
+                        return Ok(());
+                    }
+                    Ok(Some(TransactionStatus::Failed(err))) => {
+                        // Definite failure, safe to retry with new blockhash
+                        info!(
+                            id = %request.id,
+                            original_sig = %original_sig,
+                            error = %err,
+                            "Original tx failed on-chain - safe to retry with new blockhash"
+                        );
+                        // Update error type to indicate safe retry
+                        self.db_client
+                            .update_jito_tracking(
+                                &request.id,
+                                None,
+                                LastErrorType::TransactionFailed,
+                                None,
+                            )
+                            .await?;
+                    }
+                    Ok(None) => {
+                        // Transaction not found - check if blockhash has expired
+                        if let Some(ref blockhash) = request.blockhash_used {
+                            let blockhash_valid = self
+                                .blockchain_client
+                                .is_blockhash_valid(blockhash)
+                                .await
+                                .unwrap_or(false);
+
+                            if blockhash_valid {
+                                // Blockhash still valid, tx might still land - wait longer
+                                info!(
+                                    id = %request.id,
+                                    blockhash = %blockhash,
+                                    "Blockhash still valid, waiting longer before retry"
+                                );
+
+                                // Schedule a retry with backoff
+                                let retry_count =
+                                    self.db_client.increment_retry_count(&request.id).await?;
+                                let backoff = calculate_backoff(retry_count);
+                                self.db_client
+                                    .update_blockchain_status(
+                                        &request.id,
+                                        BlockchainStatus::PendingSubmission,
+                                        None,
+                                        Some("JitoStateUnknown: waiting for blockhash expiry"),
+                                        Some(Utc::now() + Duration::seconds(backoff)),
+                                    )
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
+                        // Blockhash expired and tx not found = safe to retry with new blockhash
+                        info!(
+                            id = %request.id,
+                            "Blockhash expired and tx not found - safe to retry with new blockhash"
+                        );
+                        self.db_client
+                            .update_jito_tracking(
+                                &request.id,
+                                None,
+                                LastErrorType::NetworkError,
+                                None,
+                            )
+                            .await?;
+                    }
+                    Err(e) => {
+                        // Error checking status - log and continue with caution
+                        warn!(
+                            id = %request.id,
+                            error = %e,
+                            "Failed to check original tx status, proceeding with caution"
+                        );
+                    }
+                }
+            }
         }
 
         // Delegate dispatch to blockchain client
@@ -435,6 +641,10 @@ impl AppService {
                         None,
                     )
                     .await?;
+                // Clear Jito tracking on success
+                self.db_client
+                    .update_jito_tracking(&request.id, None, LastErrorType::None, None)
+                    .await?;
             }
             Err(e) => {
                 let transfer_type = if request.token_mint.is_some() {
@@ -442,7 +652,17 @@ impl AppService {
                 } else {
                     "SOL"
                 };
-                warn!(id = %request.id, error = ?e, r#type = %transfer_type, "Transfer failed");
+
+                // Classify the error for smart retry logic
+                let error_type = self.blockchain_client.classify_error(&e);
+                warn!(
+                    id = %request.id,
+                    error = ?e,
+                    error_type = %error_type,
+                    r#type = %transfer_type,
+                    "Transfer failed"
+                );
+
                 let retry_count = self.db_client.increment_retry_count(&request.id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)
@@ -463,6 +683,23 @@ impl AppService {
                         next_retry,
                     )
                     .await?;
+
+                // Store Jito tracking info for JitoStateUnknown errors
+                // This enables status check on next retry attempt
+                if error_type == LastErrorType::JitoStateUnknown {
+                    // Extract signature and blockhash from error context if available
+                    // For now, we store the error type - signature is obtained from
+                    // blockchain_signature if previously set
+                    let original_sig = request.blockchain_signature.as_deref();
+                    self.db_client
+                        .update_jito_tracking(&request.id, original_sig, error_type, None)
+                        .await?;
+                } else {
+                    // Update error type for non-Jito errors
+                    self.db_client
+                        .update_jito_tracking(&request.id, None, error_type, None)
+                        .await?;
+                }
             }
         }
 

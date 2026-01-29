@@ -8,8 +8,8 @@ use tracing::{info, instrument};
 
 use crate::domain::types::TransferType;
 use crate::domain::{
-    AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, PaginatedResponse,
-    SubmitTransferRequest, TransferRequest, WalletRiskProfile,
+    AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, LastErrorType,
+    PaginatedResponse, SubmitTransferRequest, TransferRequest, WalletRiskProfile,
 };
 
 /// PostgreSQL connection pool configuration
@@ -107,6 +107,17 @@ impl PostgresClient {
             },
         };
 
+        // Jito Double Spend Protection fields
+        let original_tx_signature: Option<String> =
+            row.try_get("original_tx_signature").ok().flatten();
+        let last_error_type_str: Option<String> = row.try_get("last_error_type").ok().flatten();
+        let blockhash_used: Option<String> = row.try_get("blockhash_used").ok().flatten();
+
+        let last_error_type = last_error_type_str
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(LastErrorType::None);
+
         Ok(TransferRequest {
             id: row.get("id"),
             from_address: row.get("from_address"),
@@ -123,6 +134,10 @@ impl PostgresClient {
             blockchain_retry_count: row.get("blockchain_retry_count"),
             blockchain_last_error: row.get("blockchain_last_error"),
             blockchain_next_retry_at: row.get("blockchain_next_retry_at"),
+            // Jito Double Spend Protection fields
+            original_tx_signature,
+            last_error_type,
+            blockhash_used,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -148,7 +163,8 @@ impl DatabaseClient for PostgresClient {
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
-                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                   original_tx_signature, last_error_type, blockhash_used
             FROM transfer_requests 
             WHERE id = $1
             "#,
@@ -284,7 +300,8 @@ impl DatabaseClient for PostgresClient {
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
-                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
+                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                           original_tx_signature, last_error_type, blockhash_used
                     FROM transfer_requests
                     WHERE (created_at, id) < ($1, $2)
                     ORDER BY created_at DESC, id DESC
@@ -304,7 +321,8 @@ impl DatabaseClient for PostgresClient {
                            blockchain_status, blockchain_signature, blockchain_retry_count,
                            blockchain_last_error, blockchain_next_retry_at,
                            created_at, updated_at,
-                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
+                           transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                           original_tx_signature, last_error_type, blockhash_used
                     FROM transfer_requests
                     ORDER BY created_at DESC, id DESC
                     LIMIT $1
@@ -422,7 +440,8 @@ impl DatabaseClient for PostgresClient {
             RETURNING id, from_address, to_address, amount, token_mint, compliance_status,
                       blockchain_status, blockchain_signature, blockchain_retry_count,
                       blockchain_last_error, blockchain_next_retry_at, created_at, updated_at,
-                      transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof
+                      transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                      original_tx_signature, last_error_type, blockhash_used
             "#,
         )
         .bind(now)
@@ -464,7 +483,8 @@ impl DatabaseClient for PostgresClient {
                    blockchain_status, blockchain_signature, blockchain_retry_count,
                    blockchain_last_error, blockchain_next_retry_at,
                    created_at, updated_at,
-                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof 
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                   original_tx_signature, last_error_type, blockhash_used
             FROM transfer_requests 
             WHERE blockchain_signature = $1
             "#,
@@ -478,6 +498,44 @@ impl DatabaseClient for PostgresClient {
             Some(row) => Ok(Some(Self::row_to_transfer_request(&row)?)),
             None => Ok(None),
         }
+    }
+
+    // =========================================================================
+    // Jito Double Spend Protection Methods
+    // =========================================================================
+
+    /// Update Jito tracking fields for a transfer request.
+    /// Used to store the original signature, error type, and blockhash for safe retry logic.
+    #[instrument(skip(self))]
+    async fn update_jito_tracking(
+        &self,
+        id: &str,
+        original_tx_signature: Option<&str>,
+        last_error_type: LastErrorType,
+        blockhash_used: Option<&str>,
+    ) -> Result<(), AppError> {
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            UPDATE transfer_requests 
+            SET original_tx_signature = COALESCE($1, original_tx_signature),
+                last_error_type = $2,
+                blockhash_used = COALESCE($3, blockhash_used),
+                updated_at = $4
+            WHERE id = $5
+            "#,
+        )
+        .bind(original_tx_signature)
+        .bind(last_error_type.as_str())
+        .bind(blockhash_used)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        Ok(())
     }
 
     // =========================================================================
