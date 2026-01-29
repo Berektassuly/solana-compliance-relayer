@@ -236,39 +236,50 @@ async fn main() -> Result<()> {
     let provider_type = RpcProviderType::detect(&config.blockchain_rpc_url);
 
     // Build submission strategy if Jito bundles are enabled and provider is QuickNode
-    let submission_strategy: Option<
-        Box<dyn solana_compliance_relayer::infra::blockchain::SubmissionStrategy>,
-    > = if config.use_jito_bundles {
+    // Also track the tip amount for injection into transactions
+    let (submission_strategy, jito_tip_for_client): (
+        Option<Box<dyn solana_compliance_relayer::infra::blockchain::SubmissionStrategy>>,
+        Option<u64>,
+    ) = if config.use_jito_bundles {
         if matches!(provider_type, RpcProviderType::QuickNode) {
+            // Read optional Jito region (e.g., "ny", "amsterdam", "frankfurt", "tokyo")
+            let jito_region = env::var("JITO_REGION").ok();
+
             let jito_config = QuickNodeSubmissionConfig {
                 rpc_url: config.blockchain_rpc_url.clone(),
                 enable_jito_bundles: true,
                 tip_lamports: config.jito_tip_lamports,
                 max_bundle_retries: 2,
+                region: jito_region.clone(),
             };
             info!(
-                "   ✓ Jito bundle submission enabled (tip: {} lamports)",
-                config.jito_tip_lamports
+                "   ✓ Jito bundle submission enabled (tip: {} lamports, region: {:?})",
+                config.jito_tip_lamports,
+                jito_region.as_deref().unwrap_or("auto")
             );
-            Some(Box::new(QuickNodePrivateSubmissionStrategy::new(
-                jito_config,
-            )))
+            (
+                Some(Box::new(QuickNodePrivateSubmissionStrategy::new(
+                    jito_config,
+                ))),
+                Some(config.jito_tip_lamports),
+            )
         } else {
             warn!(
                 "   ⚠ USE_JITO_BUNDLES=true but provider is {} (not QuickNode) - Jito disabled",
                 provider_type.name()
             );
-            None
+            (None, None)
         }
     } else {
         info!("   ○ Jito bundle submission disabled (standard RPC mode)");
-        None
+        (None, None)
     };
 
     let blockchain_client = RpcBlockchainClient::with_defaults_and_submission_strategy(
         &config.blockchain_rpc_url,
         config.signing_key,
         submission_strategy,
+        jito_tip_for_client,
     )?;
     info!("   ✓ Blockchain client created");
 

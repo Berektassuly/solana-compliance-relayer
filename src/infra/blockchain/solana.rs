@@ -192,6 +192,9 @@ pub struct RpcBlockchainClient {
     /// RPC URL (stored for strategy use, logging, and future getter)
     #[allow(dead_code)]
     rpc_url: String,
+    /// Jito tip amount in lamports (only used when submission_strategy supports private submission)
+    /// This tip is added as a SOL transfer instruction to a Jito tip account.
+    jito_tip_lamports: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,7 +272,7 @@ impl RpcBlockchainClient {
         signing_key: SigningKey,
         config: RpcClientConfig,
     ) -> Result<Self, AppError> {
-        Self::new_with_submission_strategy(rpc_url, signing_key, config, None)
+        Self::new_with_submission_strategy(rpc_url, signing_key, config, None, None)
     }
 
     /// Create a new RPC blockchain client with custom configuration and submission strategy
@@ -284,6 +287,7 @@ impl RpcBlockchainClient {
     /// * `signing_key` - The ed25519 signing key for transaction signing
     /// * `config` - Client configuration (timeouts, retries, etc.)
     /// * `submission_strategy` - Optional submission strategy for MEV-protected submission
+    /// * `jito_tip_lamports` - Optional tip amount for Jito bundles (in lamports)
     ///
     /// # Submission Strategy Behavior
     /// When a submission strategy is provided:
@@ -294,11 +298,18 @@ impl RpcBlockchainClient {
     /// When no submission strategy is provided (None):
     /// - Uses SDK's `send_and_confirm_transaction` (blocks until confirmed)
     /// - Backward compatible with existing behavior
+    ///
+    /// # Jito Tip Injection
+    /// When `jito_tip_lamports` is Some and the submission strategy supports private
+    /// submission, a SOL transfer instruction to a Jito tip account is automatically
+    /// appended to each transaction before signing. This tip is REQUIRED for Jito
+    /// bundle acceptance.
     pub fn new_with_submission_strategy(
         rpc_url: &str,
         signing_key: SigningKey,
         config: RpcClientConfig,
         submission_strategy: Option<Box<dyn super::strategies::SubmissionStrategy>>,
+        jito_tip_lamports: Option<u64>,
     ) -> Result<Self, AppError> {
         use super::helius::{HeliusDasClient, HeliusFeeStrategy};
         use super::strategies::{FallbackFeeStrategy, QuickNodeFeeStrategy, RpcProviderType};
@@ -358,11 +369,22 @@ impl RpcBlockchainClient {
             .map(|s| s.name())
             .unwrap_or("None (SDK send_and_confirm)");
 
+        // Only log tip if we have a strategy that supports private submission
+        let effective_tip = if submission_strategy
+            .as_ref()
+            .is_some_and(|s| s.supports_private_submission())
+        {
+            jito_tip_lamports
+        } else {
+            None
+        };
+
         info!(
             rpc_url = %rpc_url,
             provider = %provider_type.name(),
             fee_strategy = %fee_strategy.name(),
             submission_strategy = %strategy_name,
+            jito_tip_lamports = ?effective_tip,
             das_enabled = das_client.is_some(),
             "Created blockchain client with SDK support"
         );
@@ -377,6 +399,7 @@ impl RpcBlockchainClient {
             submission_strategy,
             das_client,
             rpc_url: rpc_url.to_string(),
+            jito_tip_lamports,
         })
     }
 
@@ -388,16 +411,24 @@ impl RpcBlockchainClient {
     /// Create a new RPC blockchain client with default configuration and submission strategy
     ///
     /// Convenience method that combines `with_defaults` with submission strategy support.
+    ///
+    /// # Arguments
+    /// * `rpc_url` - The RPC endpoint URL
+    /// * `signing_key` - The ed25519 signing key for transaction signing
+    /// * `submission_strategy` - Optional submission strategy for MEV-protected submission
+    /// * `jito_tip_lamports` - Optional tip amount for Jito bundles (in lamports)
     pub fn with_defaults_and_submission_strategy(
         rpc_url: &str,
         signing_key: SigningKey,
         submission_strategy: Option<Box<dyn super::strategies::SubmissionStrategy>>,
+        jito_tip_lamports: Option<u64>,
     ) -> Result<Self, AppError> {
         Self::new_with_submission_strategy(
             rpc_url,
             signing_key,
             RpcClientConfig::default(),
             submission_strategy,
+            jito_tip_lamports,
         )
     }
 
@@ -415,6 +446,7 @@ impl RpcBlockchainClient {
             submission_strategy: None,
             das_client: None,
             rpc_url: String::new(),
+            jito_tip_lamports: None,
         }
     }
 
@@ -428,6 +460,50 @@ impl RpcBlockchainClient {
         self.submission_strategy
             .as_ref()
             .is_some_and(|s| s.supports_private_submission())
+    }
+
+    /// Creates a Jito tip instruction if Jito submission is enabled and configured.
+    ///
+    /// This method creates a SOL transfer instruction from the payer to a randomly
+    /// selected Jito tip account. The tip is REQUIRED for Jito bundle acceptance.
+    ///
+    /// # Returns
+    /// - `Some(Instruction)` - Tip instruction to append to the transaction
+    /// - `None` - If Jito is not enabled, not supported, or tip amount is 0
+    ///
+    /// # Best Practices
+    /// The tip instruction should be the LAST instruction in the transaction to avoid
+    /// potential issues with instruction ordering during bundle processing.
+    fn create_jito_tip_instruction(&self, payer: &Pubkey) -> Option<Instruction> {
+        // Only add tip if we have a Jito-enabled submission strategy
+        if !self.supports_private_submission() {
+            return None;
+        }
+
+        let tip_lamports = self.jito_tip_lamports?;
+
+        if tip_lamports == 0 {
+            debug!("Jito tip is 0, skipping tip instruction");
+            return None;
+        }
+
+        // Select a random tip account to reduce contention
+        let tip_account_str = super::random_jito_tip_account();
+        let tip_account = tip_account_str
+            .parse::<Pubkey>()
+            .expect("Hardcoded Jito tip account should be valid");
+
+        debug!(
+            tip_lamports = tip_lamports,
+            tip_account = %tip_account,
+            "Creating Jito tip instruction"
+        );
+
+        Some(system_instruction::transfer(
+            payer,
+            &tip_account,
+            tip_lamports,
+        ))
     }
 
     /// Get the detected provider type
@@ -1269,6 +1345,16 @@ impl BlockchainClient for RpcBlockchainClient {
 
         transfer_instructions.push(transfer_ix);
 
+        // Append Jito tip instruction to FINAL transfer transaction only
+        // (not to the proof verification transactions)
+        if let Some(tip_ix) = self.create_jito_tip_instruction(&keypair.pubkey()) {
+            info!(
+                tip_lamports = self.jito_tip_lamports.unwrap_or(0),
+                "Appending Jito tip instruction to confidential transfer"
+            );
+            transfer_instructions.push(tip_ix);
+        }
+
         let recent_blockhash = sdk_client
             .get_latest_blockhash()
             .await
@@ -1283,6 +1369,9 @@ impl BlockchainClient for RpcBlockchainClient {
 
         info!(
             via_strategy = self.submission_strategy.is_some(),
+            jito_tip = self
+                .jito_tip_lamports
+                .filter(|_| self.supports_private_submission()),
             "Sending confidential transfer transaction"
         );
 
@@ -1433,10 +1522,19 @@ impl BlockchainClient for RpcBlockchainClient {
             system_instruction::transfer(&keypair.pubkey(), &to_pubkey, amount_lamports);
 
         // Build instructions with compute budget for priority fee
-        let instructions = vec![
+        let mut instructions = vec![
             ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
             transfer_ix,
         ];
+
+        // Append Jito tip instruction if enabled (MUST be last instruction per Jito best practices)
+        if let Some(tip_ix) = self.create_jito_tip_instruction(&keypair.pubkey()) {
+            info!(
+                tip_lamports = self.jito_tip_lamports.unwrap_or(0),
+                "Appending Jito tip instruction to SOL transfer"
+            );
+            instructions.push(tip_ix);
+        }
 
         // Get recent blockhash using SDK
         let recent_blockhash = sdk_client
@@ -1460,6 +1558,7 @@ impl BlockchainClient for RpcBlockchainClient {
             to = %to_address,
             amount_lamports = %amount_lamports,
             via_strategy = self.submission_strategy.is_some(),
+            jito_tip = self.jito_tip_lamports.filter(|_| self.supports_private_submission()),
             "SOL transfer submitted"
         );
 
@@ -1649,6 +1748,15 @@ impl BlockchainClient for RpcBlockchainClient {
 
         instructions.push(transfer_ix);
 
+        // Append Jito tip instruction if enabled (MUST be last instruction per Jito best practices)
+        if let Some(tip_ix) = self.create_jito_tip_instruction(&keypair.pubkey()) {
+            info!(
+                tip_lamports = self.jito_tip_lamports.unwrap_or(0),
+                "Appending Jito tip instruction to token transfer"
+            );
+            instructions.push(tip_ix);
+        }
+
         // Get recent blockhash
         let recent_blockhash = sdk_client
             .get_latest_blockhash()
@@ -1673,6 +1781,7 @@ impl BlockchainClient for RpcBlockchainClient {
             amount = %amount,
             decimals = %decimals,
             via_strategy = self.submission_strategy.is_some(),
+            jito_tip = self.jito_tip_lamports.filter(|_| self.supports_private_submission()),
             "SPL Token transfer submitted (raw units)"
         );
 
@@ -2785,8 +2894,9 @@ mod tests {
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: true,
-            tip_lamports: 1_000,
+            tip_lamports: 10_000,
             max_bundle_retries: 2,
+            region: None,
         };
         let strategy: Box<dyn super::super::strategies::SubmissionStrategy> =
             Box::new(QuickNodePrivateSubmissionStrategy::new(config));
@@ -2795,6 +2905,7 @@ mod tests {
             "https://test.quiknode.pro/xxx",
             signing_key,
             Some(strategy),
+            Some(10_000), // Jito tip
         )
         .unwrap();
 
@@ -2812,8 +2923,9 @@ mod tests {
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: false, // Jito disabled
-            tip_lamports: 1_000,
+            tip_lamports: 10_000,
             max_bundle_retries: 2,
+            region: None,
         };
         let strategy: Box<dyn super::super::strategies::SubmissionStrategy> =
             Box::new(QuickNodePrivateSubmissionStrategy::new(config));
@@ -2822,6 +2934,7 @@ mod tests {
             "https://test.quiknode.pro/xxx",
             signing_key,
             Some(strategy),
+            None, // No tip when Jito disabled
         )
         .unwrap();
 

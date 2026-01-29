@@ -34,9 +34,14 @@ pub struct QuickNodeSubmissionConfig {
     /// Enable Jito bundle submission for private transactions
     pub enable_jito_bundles: bool,
     /// Tip amount for Jito block builders (in lamports)
+    /// Note: The actual tip instruction is added by RpcBlockchainClient before signing,
+    /// not by this strategy. This field is informational only here.
     pub tip_lamports: u64,
     /// Maximum retries for bundle submission
     pub max_bundle_retries: u32,
+    /// Optional Jito region for lower latency (e.g., "ny", "amsterdam", "frankfurt", "tokyo")
+    /// If None, Jito will auto-select the optimal region.
+    pub region: Option<String>,
 }
 
 impl Default for QuickNodeSubmissionConfig {
@@ -44,8 +49,9 @@ impl Default for QuickNodeSubmissionConfig {
         Self {
             rpc_url: String::new(),
             enable_jito_bundles: true,
-            tip_lamports: 1_000, // 0.000001 SOL
+            tip_lamports: 10_000, // 0.00001 SOL (recommended minimum)
             max_bundle_retries: 2,
+            region: None, // Let Jito choose optimal region
         }
     }
 }
@@ -54,13 +60,19 @@ impl Default for QuickNodeSubmissionConfig {
 // JITO BUNDLE TYPES
 // ============================================================================
 
-/// Jito bundle submission request
+/// Jito bundle submission request via QuickNode's sendBundle API
+///
+/// API Reference: <https://www.quicknode.com/docs/solana/sendBundle>
+///
+/// The `sendBundle` method accepts:
+/// - params[0]: Array of base58-encoded serialized transactions
+/// - params[1]: Optional region string (e.g., "ny", "amsterdam", "frankfurt", "tokyo")
 #[derive(Debug, Serialize)]
 struct JitoBundleRequest {
     jsonrpc: &'static str,
     id: u64,
-    method: String,
-    params: Vec<Vec<String>>,
+    method: &'static str,
+    params: Vec<serde_json::Value>,
 }
 
 /// Jito bundle submission response
@@ -266,6 +278,11 @@ impl QuickNodePrivateSubmissionStrategy {
 
     /// Submit transaction as a Jito bundle for private submission
     ///
+    /// Uses QuickNode's `sendBundle` RPC method which routes to Jito block builders.
+    ///
+    /// # API Reference
+    /// <https://www.quicknode.com/docs/solana/sendBundle>
+    ///
     /// # Error Handling
     /// - **Definite failures** (bundle rejected/dropped): Return `JitoBundleFailed` - safe to retry with new blockhash
     /// - **Ambiguous failures** (timeout/internal error): Return `JitoStateUnknown` - bundle may have been processed
@@ -275,15 +292,26 @@ impl QuickNodePrivateSubmissionStrategy {
     async fn submit_jito_bundle(&self, serialized_tx: &str) -> Result<String, AppError> {
         debug!(
             tx_len = serialized_tx.len(),
-            "Attempting Jito bundle submission"
+            region = ?self.config.region,
+            "Attempting Jito bundle submission via sendBundle"
         );
 
-        // QuickNode's Jito integration uses qn_broadcastBundle
+        // Build params: [[tx_base58], region?]
+        // First param is always the array of transactions (even for single tx)
+        let mut params: Vec<serde_json::Value> =
+            vec![serde_json::json!([serialized_tx.to_string()])];
+
+        // Add region if configured (optional second parameter)
+        if let Some(ref region) = self.config.region {
+            params.push(serde_json::json!(region));
+        }
+
+        // QuickNode's Jito integration uses sendBundle (NOT qn_broadcastBundle)
         let request = JitoBundleRequest {
             jsonrpc: "2.0",
             id: 1,
-            method: "qn_broadcastBundle".to_string(),
-            params: vec![vec![serialized_tx.to_string()]],
+            method: "sendBundle",
+            params,
         };
 
         let response = self
@@ -866,8 +894,9 @@ mod tests {
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: true,
-            tip_lamports: 1_000,
+            tip_lamports: 10_000,
             max_bundle_retries: 2,
+            region: None,
         };
         let strategy = QuickNodePrivateSubmissionStrategy::new(config);
         assert_eq!(strategy.name(), "QuickNode (Ghost Mode / Jito)");
@@ -899,8 +928,9 @@ mod tests {
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: false, // Disabled
-            tip_lamports: 1_000,
+            tip_lamports: 10_000,
             max_bundle_retries: 2,
+            region: Some("ny".to_string()), // Test with region
         };
         let strategy = QuickNodePrivateSubmissionStrategy::new(config);
         assert_eq!(strategy.name(), "QuickNode (Ghost Mode / Jito)");
