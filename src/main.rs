@@ -18,7 +18,10 @@ use solana_compliance_relayer::app::{
     AppState, RiskService, WorkerConfig, spawn_worker, spawn_worker_with_privacy,
 };
 use solana_compliance_relayer::infra::RpcBlockchainClient;
-use solana_compliance_relayer::infra::blockchain::{QuickNodeTokenApiClient, RpcProviderType};
+use solana_compliance_relayer::infra::blockchain::{
+    QuickNodePrivateSubmissionStrategy, QuickNodeSubmissionConfig, QuickNodeTokenApiClient,
+    RpcProviderType,
+};
 use solana_compliance_relayer::infra::compliance::range::DEFAULT_RISK_THRESHOLD;
 use solana_compliance_relayer::infra::{
     BlocklistManager, PostgresClient, PostgresConfig, PrivacyHealthCheckConfig,
@@ -48,6 +51,12 @@ struct Config {
     quicknode_webhook_secret: Option<String>,
     /// Enable privacy health checks for confidential transfers
     enable_privacy_checks: bool,
+    /// Enable Jito bundle submission for MEV-protected transactions (QuickNode only)
+    /// When enabled, transactions are submitted privately via Jito block builders,
+    /// bypassing the public mempool.
+    use_jito_bundles: bool,
+    /// Jito tip amount in lamports (default: 1000 = 0.000001 SOL)
+    jito_tip_lamports: u64,
 }
 
 impl Config {
@@ -95,6 +104,17 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true); // Enabled by default
 
+        // Jito bundle configuration (QuickNode only)
+        // Default: false for safety - explicit opt-in required
+        let use_jito_bundles = env::var("USE_JITO_BUNDLES")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let jito_tip_lamports = env::var("JITO_TIP_LAMPORTS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1_000); // Default: 0.000001 SOL
+
         let worker_config = WorkerConfig {
             enabled: enable_background_worker,
             enable_privacy_checks,
@@ -117,6 +137,8 @@ impl Config {
             helius_webhook_secret,
             quicknode_webhook_secret,
             enable_privacy_checks,
+            use_jito_bundles,
+            jito_tip_lamports,
         })
     }
 
@@ -210,9 +232,44 @@ async fn main() -> Result<()> {
     // Get pool reference for blocklist manager (before moving postgres_client into Arc)
     let db_pool = postgres_client.pool().clone();
 
-    // Initialize blockchain client
-    let blockchain_client =
-        RpcBlockchainClient::with_defaults(&config.blockchain_rpc_url, config.signing_key)?;
+    // Initialize blockchain client with optional Jito bundle submission
+    let provider_type = RpcProviderType::detect(&config.blockchain_rpc_url);
+
+    // Build submission strategy if Jito bundles are enabled and provider is QuickNode
+    let submission_strategy: Option<
+        Box<dyn solana_compliance_relayer::infra::blockchain::SubmissionStrategy>,
+    > = if config.use_jito_bundles {
+        if matches!(provider_type, RpcProviderType::QuickNode) {
+            let jito_config = QuickNodeSubmissionConfig {
+                rpc_url: config.blockchain_rpc_url.clone(),
+                enable_jito_bundles: true,
+                tip_lamports: config.jito_tip_lamports,
+                max_bundle_retries: 2,
+            };
+            info!(
+                "   ✓ Jito bundle submission enabled (tip: {} lamports)",
+                config.jito_tip_lamports
+            );
+            Some(Box::new(QuickNodePrivateSubmissionStrategy::new(
+                jito_config,
+            )))
+        } else {
+            warn!(
+                "   ⚠ USE_JITO_BUNDLES=true but provider is {} (not QuickNode) - Jito disabled",
+                provider_type.name()
+            );
+            None
+        }
+    } else {
+        info!("   ○ Jito bundle submission disabled (standard RPC mode)");
+        None
+    };
+
+    let blockchain_client = RpcBlockchainClient::with_defaults_and_submission_strategy(
+        &config.blockchain_rpc_url,
+        config.signing_key,
+        submission_strategy,
+    )?;
     info!("   ✓ Blockchain client created");
 
     let compliance_provider = solana_compliance_relayer::infra::RangeComplianceProvider::new(

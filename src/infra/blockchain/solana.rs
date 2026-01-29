@@ -170,7 +170,7 @@ impl SolanaRpcProvider for HttpSolanaRpcProvider {
 /// Auto-detects the RPC provider (Helius, QuickNode, Standard) and activates
 /// premium features accordingly:
 /// - Helius: Priority fee estimation, DAS compliance checks
-/// - QuickNode: Priority fee estimation
+/// - QuickNode: Priority fee estimation, Jito bundle submission (Ghost Mode)
 /// - Standard: Fallback fee strategy
 pub struct RpcBlockchainClient {
     provider: Box<dyn SolanaRpcProvider>,
@@ -183,9 +183,13 @@ pub struct RpcBlockchainClient {
     provider_type: super::strategies::RpcProviderType,
     /// Priority fee estimation strategy
     fee_strategy: Box<dyn super::strategies::FeeStrategy>,
+    /// Transaction submission strategy (Jito bundles, standard RPC, etc.)
+    /// When present, transactions are submitted via this strategy instead of
+    /// the SDK's send_and_confirm_transaction.
+    submission_strategy: Option<Box<dyn super::strategies::SubmissionStrategy>>,
     /// Helius DAS client for compliance checks (only for Helius provider)
     das_client: Option<super::helius::HeliusDasClient>,
-    /// RPC URL (stored for strategy use and future integration)
+    /// RPC URL (stored for strategy use, logging, and future getter)
     #[allow(dead_code)]
     rpc_url: String,
 }
@@ -257,10 +261,44 @@ impl RpcBlockchainClient {
     /// - **Helius**: Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks
     /// - **QuickNode**: Priority fee estimation via `qn_estimatePriorityFees`
     /// - **Standard**: Fallback to static priority fee
+    ///
+    /// Note: This constructor does NOT enable Jito bundle submission. Use
+    /// `new_with_submission_strategy` to enable MEV-protected submission.
     pub fn new(
         rpc_url: &str,
         signing_key: SigningKey,
         config: RpcClientConfig,
+    ) -> Result<Self, AppError> {
+        Self::new_with_submission_strategy(rpc_url, signing_key, config, None)
+    }
+
+    /// Create a new RPC blockchain client with custom configuration and submission strategy
+    ///
+    /// Automatically detects the RPC provider type and activates premium features:
+    /// - **Helius**: Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks
+    /// - **QuickNode**: Priority fee estimation via `qn_estimatePriorityFees`, Jito bundles (if enabled)
+    /// - **Standard**: Fallback to static priority fee
+    ///
+    /// # Arguments
+    /// * `rpc_url` - The RPC endpoint URL
+    /// * `signing_key` - The ed25519 signing key for transaction signing
+    /// * `config` - Client configuration (timeouts, retries, etc.)
+    /// * `submission_strategy` - Optional submission strategy for MEV-protected submission
+    ///
+    /// # Submission Strategy Behavior
+    /// When a submission strategy is provided:
+    /// - Transactions are submitted via the strategy (e.g., Jito bundles)
+    /// - Returns immediately after submission (does NOT wait for confirmation)
+    /// - Confirmation should be handled via polling or webhooks
+    ///
+    /// When no submission strategy is provided (None):
+    /// - Uses SDK's `send_and_confirm_transaction` (blocks until confirmed)
+    /// - Backward compatible with existing behavior
+    pub fn new_with_submission_strategy(
+        rpc_url: &str,
+        signing_key: SigningKey,
+        config: RpcClientConfig,
+        submission_strategy: Option<Box<dyn super::strategies::SubmissionStrategy>>,
     ) -> Result<Self, AppError> {
         use super::helius::{HeliusDasClient, HeliusFeeStrategy};
         use super::strategies::{FallbackFeeStrategy, QuickNodeFeeStrategy, RpcProviderType};
@@ -314,10 +352,17 @@ impl RpcBlockchainClient {
             CommitmentConfig::confirmed(),
         );
 
+        // Log submission strategy status
+        let strategy_name = submission_strategy
+            .as_ref()
+            .map(|s| s.name())
+            .unwrap_or("None (SDK send_and_confirm)");
+
         info!(
             rpc_url = %rpc_url,
             provider = %provider_type.name(),
             fee_strategy = %fee_strategy.name(),
+            submission_strategy = %strategy_name,
             das_enabled = das_client.is_some(),
             "Created blockchain client with SDK support"
         );
@@ -329,6 +374,7 @@ impl RpcBlockchainClient {
             keypair: Some(keypair),
             provider_type,
             fee_strategy,
+            submission_strategy,
             das_client,
             rpc_url: rpc_url.to_string(),
         })
@@ -337,6 +383,22 @@ impl RpcBlockchainClient {
     /// Create a new RPC blockchain client with default configuration
     pub fn with_defaults(rpc_url: &str, signing_key: SigningKey) -> Result<Self, AppError> {
         Self::new(rpc_url, signing_key, RpcClientConfig::default())
+    }
+
+    /// Create a new RPC blockchain client with default configuration and submission strategy
+    ///
+    /// Convenience method that combines `with_defaults` with submission strategy support.
+    pub fn with_defaults_and_submission_strategy(
+        rpc_url: &str,
+        signing_key: SigningKey,
+        submission_strategy: Option<Box<dyn super::strategies::SubmissionStrategy>>,
+    ) -> Result<Self, AppError> {
+        Self::new_with_submission_strategy(
+            rpc_url,
+            signing_key,
+            RpcClientConfig::default(),
+            submission_strategy,
+        )
     }
 
     /// Create a new client with a specific provider (useful for testing)
@@ -350,9 +412,22 @@ impl RpcBlockchainClient {
             keypair: None,
             provider_type: RpcProviderType::Standard,
             fee_strategy: Box::new(FallbackFeeStrategy::new()),
+            submission_strategy: None,
             das_client: None,
             rpc_url: String::new(),
         }
+    }
+
+    /// Check if this client has a submission strategy configured
+    pub fn has_submission_strategy(&self) -> bool {
+        self.submission_strategy.is_some()
+    }
+
+    /// Check if this client supports private/MEV-protected submission
+    pub fn supports_private_submission(&self) -> bool {
+        self.submission_strategy
+            .as_ref()
+            .is_some_and(|s| s.supports_private_submission())
     }
 
     /// Get the detected provider type
@@ -440,6 +515,163 @@ impl RpcBlockchainClient {
     #[allow(dead_code)]
     async fn get_quicknode_priority_fee(&self) -> u64 {
         self.get_priority_fee(None).await
+    }
+
+    /// Submit a transaction via the configured strategy, or fall back to SDK confirmation
+    ///
+    /// # Behavior
+    /// - **With submission strategy**: Serializes to Base58, submits via strategy, returns
+    ///   immediately. The transaction is "submitted" but not yet "confirmed". Confirmation
+    ///   should be handled via polling (`wait_for_confirmation`) or webhooks.
+    ///
+    /// - **Without submission strategy**: Uses SDK's `send_and_confirm_transaction` which
+    ///   blocks until the transaction is confirmed. Returns only after confirmation.
+    ///
+    /// # Important: "Submitted" State Resilience
+    /// When using the submission strategy path, the transaction is persisted as "Submitted"
+    /// immediately after this call returns successfully. However, the transaction may not
+    /// be indexed by RPC nodes yet. `get_transaction_status` handles this gracefully by
+    /// returning `false` (not confirmed) rather than an error for "not found" transactions.
+    async fn submit_or_confirm_transaction(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<String, AppError> {
+        let sdk_client = self.sdk_client.as_ref().ok_or_else(|| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(
+                "SDK client not available".to_string(),
+            ))
+        })?;
+
+        if let Some(ref strategy) = self.submission_strategy {
+            // Serialize transaction to Base58 for strategy submission
+            let serialized_tx = self.serialize_transaction_base58(transaction)?;
+
+            // Submit via strategy (Jito bundle, standard sendTransaction, etc.)
+            // The strategy handles signature extraction internally
+            let signature = strategy.submit_transaction(&serialized_tx, true).await?;
+
+            info!(
+                signature = %signature,
+                strategy = %strategy.name(),
+                "Transaction submitted via submission strategy (confirmation pending)"
+            );
+
+            Ok(signature)
+        } else {
+            // No strategy - use SDK's blocking send_and_confirm
+            let signature = sdk_client
+                .send_and_confirm_transaction(transaction)
+                .await
+                .map_err(map_solana_client_error)?;
+
+            debug!(
+                signature = %signature,
+                "Transaction confirmed via SDK send_and_confirm"
+            );
+
+            Ok(signature.to_string())
+        }
+    }
+
+    /// Serialize a signed transaction to Base58 encoding
+    ///
+    /// Used for submitting transactions via the submission strategy.
+    fn serialize_transaction_base58(&self, transaction: &Transaction) -> Result<String, AppError> {
+        let serialized = bincode::serialize(transaction).map_err(|e| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                "Failed to serialize transaction: {}",
+                e
+            )))
+        })?;
+
+        Ok(bs58::encode(&serialized).into_string())
+    }
+
+    /// Submit a transaction and wait for confirmation
+    ///
+    /// This method is used for multi-transaction flows (like confidential transfers)
+    /// where subsequent transactions depend on previous ones being confirmed.
+    ///
+    /// # Behavior
+    /// - **With submission strategy**: Submits via strategy (MEV-protected), then polls
+    ///   for confirmation using `get_transaction_status` until confirmed or timeout.
+    ///
+    /// - **Without submission strategy**: Uses SDK's `send_and_confirm_transaction`.
+    ///
+    /// # Privacy Considerations for Confidential Transfers
+    /// When Jito bundles are enabled, ALL transactions in a confidential transfer flow
+    /// go through the private mempool:
+    /// - Proof verification transactions (equality, validity, range)
+    /// - Final transfer transaction
+    ///
+    /// This prevents timing correlation attacks where an observer could see proof
+    /// verification transactions and infer that a confidential transfer is imminent.
+    async fn submit_and_confirm_transaction(
+        &self,
+        transaction: &Transaction,
+        description: &str,
+    ) -> Result<String, AppError> {
+        let sdk_client = self.sdk_client.as_ref().ok_or_else(|| {
+            AppError::Blockchain(BlockchainError::TransactionFailed(
+                "SDK client not available".to_string(),
+            ))
+        })?;
+
+        if let Some(ref strategy) = self.submission_strategy {
+            // Serialize transaction to Base58 for strategy submission
+            let serialized_tx = self.serialize_transaction_base58(transaction)?;
+
+            // Submit via strategy (Jito bundle, standard sendTransaction, etc.)
+            let signature = strategy.submit_transaction(&serialized_tx, true).await?;
+
+            info!(
+                signature = %signature,
+                strategy = %strategy.name(),
+                description = %description,
+                "Transaction submitted via strategy, waiting for confirmation..."
+            );
+
+            // Wait for confirmation (poll-based)
+            // Use a reasonable timeout for on-chain confirmation
+            let confirmation_timeout_secs = self.config.confirmation_timeout.as_secs();
+            let confirmed = self
+                .wait_for_confirmation(&signature, confirmation_timeout_secs)
+                .await?;
+
+            if !confirmed {
+                return Err(AppError::Blockchain(BlockchainError::Timeout(format!(
+                    "Transaction {} not confirmed within {}s: {}",
+                    signature, confirmation_timeout_secs, description
+                ))));
+            }
+
+            info!(
+                signature = %signature,
+                description = %description,
+                "Transaction confirmed"
+            );
+
+            Ok(signature)
+        } else {
+            // No strategy - use SDK's blocking send_and_confirm
+            let signature = sdk_client
+                .send_and_confirm_transaction(transaction)
+                .await
+                .map_err(|e| {
+                    AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                        "{}: {}",
+                        description, e
+                    )))
+                })?;
+
+            debug!(
+                signature = %signature,
+                description = %description,
+                "Transaction confirmed via SDK"
+            );
+
+            Ok(signature.to_string())
+        }
     }
 }
 
@@ -755,15 +987,9 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        sdk_client
-            .send_and_confirm_transaction(&equality_tx)
-            .await
-            .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                    "Equality proof verification failed: {}",
-                    e
-                )))
-            })?;
+        // Use submission strategy if available (MEV-protected) and wait for confirmation
+        self.submit_and_confirm_transaction(&equality_tx, "Equality proof verification")
+            .await?;
 
         info!("Equality proof verified and context state created");
 
@@ -819,15 +1045,9 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        sdk_client
-            .send_and_confirm_transaction(&validity_tx)
-            .await
-            .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                    "Validity proof verification failed: {}",
-                    e
-                )))
-            })?;
+        // Use submission strategy if available (MEV-protected) and wait for confirmation
+        self.submit_and_confirm_transaction(&validity_tx, "Ciphertext validity proof verification")
+            .await?;
 
         info!("Validity proof verified and context state created");
 
@@ -917,15 +1137,12 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        sdk_client
-            .send_and_confirm_transaction(&create_and_write_record_tx)
-            .await
-            .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                    "Failed to create and write range proof record: {}",
-                    e
-                )))
-            })?;
+        // Use submission strategy if available (MEV-protected) and wait for confirmation
+        self.submit_and_confirm_transaction(
+            &create_and_write_record_tx,
+            "Create and write range proof record",
+        )
+        .await?;
 
         info!("Range proof record account created and data written");
 
@@ -974,15 +1191,9 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        sdk_client
-            .send_and_confirm_transaction(&range_tx)
-            .await
-            .map_err(|e| {
-                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                    "Range proof verification failed: {}",
-                    e
-                )))
-            })?;
+        // Use submission strategy if available (MEV-protected) and wait for confirmation
+        self.submit_and_confirm_transaction(&range_tx, "Range proof verification")
+            .await?;
 
         info!("Range proof verified and context state created");
 
@@ -1070,10 +1281,16 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        info!("Sending confidential transfer transaction");
+        info!(
+            via_strategy = self.submission_strategy.is_some(),
+            "Sending confidential transfer transaction"
+        );
 
-        let signature = sdk_client
-            .send_and_confirm_transaction(&transfer_tx)
+        // For the final transfer, we can use submit_or_confirm_transaction
+        // (doesn't need to wait for subsequent transactions)
+        // But for consistency with MEV protection, we use the strategy if available
+        let signature = self
+            .submit_or_confirm_transaction(&transfer_tx)
             .await
             .map_err(|e| {
                 let msg = e.to_string();
@@ -1088,7 +1305,7 @@ impl BlockchainClient for RpcBlockchainClient {
                         msg
                     )))
                 } else {
-                    map_solana_client_error(e)
+                    e
                 }
             })?;
 
@@ -1096,10 +1313,11 @@ impl BlockchainClient for RpcBlockchainClient {
             signature = %signature,
             to = %to_address,
             token_mint = %token_mint,
+            via_strategy = self.submission_strategy.is_some(),
             "Confidential transfer with split proofs completed successfully"
         );
 
-        Ok(signature.to_string())
+        Ok(signature)
     }
 
     #[instrument(skip(self))]
@@ -1234,15 +1452,18 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        // Send and confirm transaction
-        let signature = sdk_client
-            .send_and_confirm_transaction(&transaction)
-            .await
-            .map_err(map_solana_client_error)?;
+        // Submit via strategy if available, otherwise use SDK
+        let signature = self.submit_or_confirm_transaction(&transaction).await?;
 
-        info!(signature = %signature, to = %to_address, amount_lamports = %amount_lamports, "SOL transfer submitted via SDK");
+        info!(
+            signature = %signature,
+            to = %to_address,
+            amount_lamports = %amount_lamports,
+            via_strategy = self.submission_strategy.is_some(),
+            "SOL transfer submitted"
+        );
 
-        Ok(signature.to_string())
+        Ok(signature)
     }
 
     #[instrument(skip(self))]
@@ -1442,11 +1663,8 @@ impl BlockchainClient for RpcBlockchainClient {
             recent_blockhash,
         );
 
-        // Send and confirm transaction
-        let signature = sdk_client
-            .send_and_confirm_transaction(&transaction)
-            .await
-            .map_err(map_solana_client_error)?;
+        // Submit via strategy if available, otherwise use SDK
+        let signature = self.submit_or_confirm_transaction(&transaction).await?;
 
         info!(
             signature = %signature,
@@ -1454,10 +1672,11 @@ impl BlockchainClient for RpcBlockchainClient {
             token_mint = %token_mint,
             amount = %amount,
             decimals = %decimals,
+            via_strategy = self.submission_strategy.is_some(),
             "SPL Token transfer submitted (raw units)"
         );
 
-        Ok(signature.to_string())
+        Ok(signature)
     }
 
     /// Check if a wallet holds compliant assets using Helius DAS.
@@ -2538,5 +2757,118 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.max_retries, 0);
+    }
+
+    // ====================================================================
+    // SUBMISSION STRATEGY INTEGRATION TESTS
+    // ====================================================================
+
+    #[test]
+    fn test_client_without_submission_strategy() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let client =
+            RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
+                .unwrap();
+
+        // Without explicit strategy, should not have one
+        assert!(!client.has_submission_strategy());
+        assert!(!client.supports_private_submission());
+    }
+
+    #[test]
+    fn test_client_with_submission_strategy_constructor() {
+        use super::super::quicknode::{
+            QuickNodePrivateSubmissionStrategy, QuickNodeSubmissionConfig,
+        };
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let config = QuickNodeSubmissionConfig {
+            rpc_url: "https://test.quiknode.pro/xxx".to_string(),
+            enable_jito_bundles: true,
+            tip_lamports: 1_000,
+            max_bundle_retries: 2,
+        };
+        let strategy: Box<dyn super::super::strategies::SubmissionStrategy> =
+            Box::new(QuickNodePrivateSubmissionStrategy::new(config));
+
+        let client = RpcBlockchainClient::with_defaults_and_submission_strategy(
+            "https://test.quiknode.pro/xxx",
+            signing_key,
+            Some(strategy),
+        )
+        .unwrap();
+
+        assert!(client.has_submission_strategy());
+        assert!(client.supports_private_submission());
+    }
+
+    #[test]
+    fn test_client_with_jito_disabled_strategy() {
+        use super::super::quicknode::{
+            QuickNodePrivateSubmissionStrategy, QuickNodeSubmissionConfig,
+        };
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let config = QuickNodeSubmissionConfig {
+            rpc_url: "https://test.quiknode.pro/xxx".to_string(),
+            enable_jito_bundles: false, // Jito disabled
+            tip_lamports: 1_000,
+            max_bundle_retries: 2,
+        };
+        let strategy: Box<dyn super::super::strategies::SubmissionStrategy> =
+            Box::new(QuickNodePrivateSubmissionStrategy::new(config));
+
+        let client = RpcBlockchainClient::with_defaults_and_submission_strategy(
+            "https://test.quiknode.pro/xxx",
+            signing_key,
+            Some(strategy),
+        )
+        .unwrap();
+
+        // Has strategy, but private submission is not supported (Jito disabled)
+        assert!(client.has_submission_strategy());
+        assert!(!client.supports_private_submission());
+    }
+
+    #[test]
+    fn test_with_provider_has_no_strategy() {
+        let provider = ConfigurableMockProvider::new();
+        let config = RpcClientConfig::default();
+        let client = RpcBlockchainClient::with_provider(Box::new(provider), config);
+
+        // with_provider doesn't accept a strategy, so it should not have one
+        assert!(!client.has_submission_strategy());
+        assert!(!client.supports_private_submission());
+    }
+
+    #[test]
+    fn test_serialize_transaction_base58() {
+        use solana_sdk::{hash::Hash, transaction::Transaction};
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let client =
+            RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
+                .unwrap();
+
+        // Create a minimal unsigned transaction
+        let recent_blockhash = Hash::new_unique();
+        let keypair = client.keypair.as_ref().unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[],
+            Some(&keypair.pubkey()),
+            &[keypair],
+            recent_blockhash,
+        );
+
+        // Serialize should work
+        let result = client.serialize_transaction_base58(&tx);
+        assert!(result.is_ok());
+
+        let serialized = result.unwrap();
+        assert!(!serialized.is_empty());
+
+        // Should be valid Base58
+        let decoded = bs58::decode(&serialized).into_vec();
+        assert!(decoded.is_ok());
     }
 }

@@ -135,6 +135,135 @@ impl QuickNodePrivateSubmissionStrategy {
         }
     }
 
+    /// Extract the transaction signature from a Base58-encoded serialized transaction
+    ///
+    /// Solana transaction wire format:
+    /// - Compact-u16: Number of signatures
+    /// - [Signature; num_signatures]: 64-byte signatures
+    /// - Message: (rest of transaction)
+    ///
+    /// The FIRST signature is always the fee payer's signature and serves as
+    /// the transaction ID (signature) used for lookups.
+    ///
+    /// # Why This Is Needed
+    /// QuickNode's `qn_broadcastBundle` returns a bundle ID (internal identifier),
+    /// NOT the transaction signature. We need the actual tx signature for:
+    /// - Transaction status lookups via `getSignatureStatuses`
+    /// - Webhook correlation (Helius/QuickNode webhooks use tx signatures)
+    /// - User-facing transaction links (explorers use tx signatures)
+    fn extract_signature_from_serialized_tx(serialized_tx: &str) -> Result<String, AppError> {
+        // Decode Base58 to bytes
+        let tx_bytes = bs58::decode(serialized_tx).into_vec().map_err(|e| {
+            AppError::Blockchain(BlockchainError::InvalidSignature(format!(
+                "Failed to decode Base58 transaction: {}",
+                e
+            )))
+        })?;
+
+        // Solana transaction format:
+        // - Compact-u16 for signature count (1-3 bytes)
+        // - N * 64-byte signatures
+        // - Message
+        //
+        // For most transactions, signature count is < 128, so it's 1 byte.
+        // We need to read the compact-u16 properly.
+        if tx_bytes.is_empty() {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Empty transaction bytes".to_string(),
+            )));
+        }
+
+        // Read compact-u16 for signature count
+        let (sig_count, offset) = Self::read_compact_u16(&tx_bytes)?;
+
+        if sig_count == 0 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Transaction has no signatures".to_string(),
+            )));
+        }
+
+        // Signature is 64 bytes
+        const SIGNATURE_SIZE: usize = 64;
+        let sig_end = offset + SIGNATURE_SIZE;
+
+        if tx_bytes.len() < sig_end {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                format!(
+                    "Transaction too short: {} bytes, need at least {} for first signature",
+                    tx_bytes.len(),
+                    sig_end
+                ),
+            )));
+        }
+
+        // Extract the first signature (fee payer's signature = transaction ID)
+        let signature_bytes = &tx_bytes[offset..sig_end];
+        let signature = bs58::encode(signature_bytes).into_string();
+
+        debug!(
+            tx_len = tx_bytes.len(),
+            sig_count = sig_count,
+            signature = %signature,
+            "Extracted transaction signature from serialized transaction"
+        );
+
+        Ok(signature)
+    }
+
+    /// Read a compact-u16 from a byte slice (Solana's variable-length encoding)
+    ///
+    /// Returns (value, bytes_consumed)
+    fn read_compact_u16(bytes: &[u8]) -> Result<(usize, usize), AppError> {
+        if bytes.is_empty() {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Cannot read compact-u16 from empty bytes".to_string(),
+            )));
+        }
+
+        // Compact-u16 encoding:
+        // - If high bit is 0, value is the byte itself (0-127)
+        // - If high bit is 1, continue to next byte
+        let first = bytes[0] as usize;
+
+        if first < 0x80 {
+            // Single byte (0-127)
+            return Ok((first, 1));
+        }
+
+        if bytes.len() < 2 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Truncated compact-u16".to_string(),
+            )));
+        }
+
+        let second = bytes[1] as usize;
+
+        if second < 0x80 {
+            // Two bytes (128-16383)
+            let value = (first & 0x7F) | (second << 7);
+            return Ok((value, 2));
+        }
+
+        if bytes.len() < 3 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Truncated compact-u16".to_string(),
+            )));
+        }
+
+        let third = bytes[2] as usize;
+
+        // Three bytes (16384-65535, but u16 max is 65535)
+        // For signature counts, this is extremely unlikely (would need 256+ signers)
+        if third >= 0x04 {
+            return Err(AppError::Blockchain(BlockchainError::InvalidSignature(
+                "Compact-u16 overflow (value > 65535)".to_string(),
+            )));
+        }
+
+        let value = (first & 0x7F) | ((second & 0x7F) << 7) | (third << 14);
+        Ok((value, 3))
+    }
+
     /// Submit transaction as a Jito bundle for private submission
     ///
     /// # Error Handling
@@ -318,15 +447,23 @@ impl SubmissionStrategy for QuickNodePrivateSubmissionStrategy {
         serialized_tx: &str,
         skip_preflight: bool,
     ) -> Result<String, AppError> {
+        // CRITICAL: Extract the transaction signature BEFORE submission
+        // qn_broadcastBundle returns a bundle ID, NOT the transaction signature.
+        // We need the actual tx signature for status lookups and webhook correlation.
+        let tx_signature = Self::extract_signature_from_serialized_tx(serialized_tx)?;
+
         // When Jito bundles are enabled, use ONLY Jito submission (no fallback to public mempool)
         if self.config.enable_jito_bundles {
             match self.submit_jito_bundle(serialized_tx).await {
-                Ok(signature) => {
+                Ok(bundle_id) => {
                     info!(
-                        signature = %signature,
+                        tx_signature = %tx_signature,
+                        bundle_id = %bundle_id,
                         "🔒 Ghost Mode: Transaction submitted privately via Jito bundle"
                     );
-                    return Ok(signature);
+                    // Return the TX SIGNATURE, not the bundle ID
+                    // This ensures status lookups and webhook correlation work correctly
+                    return Ok(tx_signature);
                 }
                 Err(e) => {
                     // SECURITY: No fallback to public mempool when Jito is enabled
@@ -335,24 +472,28 @@ impl SubmissionStrategy for QuickNodePrivateSubmissionStrategy {
                         AppError::Blockchain(BlockchainError::JitoBundleFailed(msg)) => {
                             warn!(
                                 error = %msg,
+                                tx_signature = %tx_signature,
                                 "🔒 Ghost Mode: Jito bundle rejected (definite failure, safe to retry)"
                             );
                         }
                         AppError::Blockchain(BlockchainError::JitoStateUnknown(msg)) => {
                             warn!(
                                 error = %msg,
+                                tx_signature = %tx_signature,
                                 "🔒 Ghost Mode: Jito bundle state unknown (DO NOT retry with new blockhash)"
                             );
                         }
                         AppError::Blockchain(BlockchainError::PrivateSubmissionFallback(msg)) => {
                             warn!(
                                 error = %msg,
+                                tx_signature = %tx_signature,
                                 "🔒 Ghost Mode: Jito not available on this endpoint"
                             );
                         }
                         _ => {
                             warn!(
                                 error = %e,
+                                tx_signature = %tx_signature,
                                 "🔒 Ghost Mode: Jito submission failed"
                             );
                         }
@@ -364,6 +505,7 @@ impl SubmissionStrategy for QuickNodePrivateSubmissionStrategy {
         }
 
         // Standard submission only when Jito is explicitly disabled
+        // Note: sendTransaction returns the actual tx signature, so no extraction needed
         let signature = self.submit_standard(serialized_tx, skip_preflight).await?;
         info!(
             signature = %signature,
@@ -827,5 +969,161 @@ mod tests {
                 msg
             );
         }
+    }
+
+    // ====================================================================
+    // SIGNATURE EXTRACTION TESTS
+    // ====================================================================
+
+    #[test]
+    fn test_read_compact_u16_single_byte() {
+        // Values 0-127 are encoded in a single byte
+        let bytes = [0x01]; // 1
+        let (value, consumed) =
+            QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes).unwrap();
+        assert_eq!(value, 1);
+        assert_eq!(consumed, 1);
+
+        let bytes = [0x7F]; // 127
+        let (value, consumed) =
+            QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes).unwrap();
+        assert_eq!(value, 127);
+        assert_eq!(consumed, 1);
+
+        let bytes = [0x00]; // 0
+        let (value, consumed) =
+            QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes).unwrap();
+        assert_eq!(value, 0);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_read_compact_u16_two_bytes() {
+        // Values 128-16383 are encoded in two bytes
+        // 128 = 0x80 | 0x01 (continuation bit set in first byte)
+        let bytes = [0x80, 0x01]; // 128
+        let (value, consumed) =
+            QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes).unwrap();
+        assert_eq!(value, 128);
+        assert_eq!(consumed, 2);
+
+        // 255 = (0xFF & 0x7F) | (0x01 << 7) = 127 + 128 = 255
+        let bytes = [0xFF, 0x01]; // 255
+        let (value, consumed) =
+            QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes).unwrap();
+        assert_eq!(value, 255);
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn test_read_compact_u16_empty() {
+        let bytes: [u8; 0] = [];
+        let result = QuickNodePrivateSubmissionStrategy::read_compact_u16(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_signature_from_serialized_tx() {
+        // Create a mock serialized transaction:
+        // - 1 byte: signature count (1)
+        // - 64 bytes: signature
+        // - rest: message (we just need some bytes)
+        let mut tx_bytes = Vec::new();
+        tx_bytes.push(0x01); // 1 signature (compact-u16, single byte)
+
+        // Create a known 64-byte signature
+        let mut signature_bytes = [0u8; 64];
+        for (i, byte) in signature_bytes.iter_mut().enumerate() {
+            *byte = (i as u8) + 1; // 1, 2, 3, ..., 64
+        }
+        tx_bytes.extend_from_slice(&signature_bytes);
+
+        // Add some mock message bytes
+        tx_bytes.extend_from_slice(&[0xFF; 100]);
+
+        // Encode as Base58
+        let serialized_tx = bs58::encode(&tx_bytes).into_string();
+
+        // Extract the signature
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            &serialized_tx,
+        );
+        assert!(result.is_ok());
+
+        let extracted_sig = result.unwrap();
+
+        // The extracted signature should be the Base58 encoding of our signature bytes
+        let expected_sig = bs58::encode(&signature_bytes).into_string();
+        assert_eq!(extracted_sig, expected_sig);
+    }
+
+    #[test]
+    fn test_extract_signature_empty_transaction() {
+        let serialized_tx = bs58::encode(&[]).into_string();
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            &serialized_tx,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_signature_no_signatures() {
+        // Transaction with 0 signatures
+        let tx_bytes = [0x00]; // 0 signatures
+        let serialized_tx = bs58::encode(&tx_bytes).into_string();
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            &serialized_tx,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_signature_truncated_transaction() {
+        // Transaction with 1 signature claimed but not enough bytes
+        let mut tx_bytes = Vec::new();
+        tx_bytes.push(0x01); // 1 signature
+        tx_bytes.extend_from_slice(&[0xAA; 32]); // Only 32 bytes, need 64
+
+        let serialized_tx = bs58::encode(&tx_bytes).into_string();
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            &serialized_tx,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_signature_invalid_base58() {
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            "not-valid-base58!!!",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_signature_multiple_signatures() {
+        // Transaction with 2 signatures - should extract the FIRST one (fee payer)
+        let mut tx_bytes = Vec::new();
+        tx_bytes.push(0x02); // 2 signatures
+
+        // First signature (this is the one we should extract)
+        let first_sig = [0x11u8; 64];
+        tx_bytes.extend_from_slice(&first_sig);
+
+        // Second signature
+        let second_sig = [0x22u8; 64];
+        tx_bytes.extend_from_slice(&second_sig);
+
+        // Mock message
+        tx_bytes.extend_from_slice(&[0xFF; 50]);
+
+        let serialized_tx = bs58::encode(&tx_bytes).into_string();
+        let result = QuickNodePrivateSubmissionStrategy::extract_signature_from_serialized_tx(
+            &serialized_tx,
+        );
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        let expected = bs58::encode(&first_sig).into_string();
+        assert_eq!(extracted, expected);
     }
 }
