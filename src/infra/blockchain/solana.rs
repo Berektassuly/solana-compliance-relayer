@@ -25,7 +25,7 @@ use solana_sdk::{
 };
 use solana_system_interface::instruction as system_instruction;
 use solana_zk_sdk::zk_elgamal_proof_program::{
-    instruction::{ContextStateInfo, ProofInstruction},
+    instruction::{ContextStateInfo, ProofInstruction, close_context_state},
     proof_data::{
         BatchedGroupedCiphertext3HandlesValidityProofContext,
         BatchedGroupedCiphertext3HandlesValidityProofData, BatchedRangeProofContext,
@@ -1359,8 +1359,7 @@ impl BlockchainClient for RpcBlockchainClient {
             context_state_account: &equality_ctx_address,
             context_state_authority: &authority_address,
         };
-        let close_equality_ctx_ix =
-            ProofInstruction::close_context_state(equality_ctx_info, &destination_pubkey);
+        let close_equality_ctx_ix = close_context_state(equality_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_equality_ctx_ix);
 
         // Close validity proof context
@@ -1368,8 +1367,7 @@ impl BlockchainClient for RpcBlockchainClient {
             context_state_account: &validity_ctx_address,
             context_state_authority: &authority_address,
         };
-        let close_validity_ctx_ix =
-            ProofInstruction::close_context_state(validity_ctx_info, &destination_pubkey);
+        let close_validity_ctx_ix = close_context_state(validity_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_validity_ctx_ix);
 
         // Close range proof context
@@ -1377,8 +1375,7 @@ impl BlockchainClient for RpcBlockchainClient {
             context_state_account: &range_ctx_address,
             context_state_authority: &authority_address,
         };
-        let close_range_ctx_ix =
-            ProofInstruction::close_context_state(range_ctx_info, &destination_pubkey);
+        let close_range_ctx_ix = close_context_state(range_ctx_info, &destination_pubkey);
         transfer_instructions.push(close_range_ctx_ix);
 
         // Close range proof record account (spl_record)
