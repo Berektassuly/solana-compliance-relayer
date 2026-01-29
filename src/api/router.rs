@@ -93,10 +93,22 @@ pub struct RateLimitState {
 
 impl RateLimitState {
     pub fn new(config: RateLimitConfig) -> Self {
-        let transfers_quota = Quota::per_second(NonZeroU32::new(config.general_rps).unwrap())
-            .allow_burst(NonZeroU32::new(config.general_burst).unwrap());
-        let health_quota = Quota::per_second(NonZeroU32::new(config.health_rps).unwrap())
-            .allow_burst(NonZeroU32::new(config.health_burst).unwrap());
+        let transfers_quota = Quota::per_second(
+            NonZeroU32::new(config.general_rps)
+                .expect("Invalid configuration: general_rps rate limit cannot be 0"),
+        )
+        .allow_burst(
+            NonZeroU32::new(config.general_burst)
+                .expect("Invalid configuration: general_burst rate limit cannot be 0"),
+        );
+        let health_quota = Quota::per_second(
+            NonZeroU32::new(config.health_rps)
+                .expect("Invalid configuration: health_rps rate limit cannot be 0"),
+        )
+        .allow_burst(
+            NonZeroU32::new(config.health_burst)
+                .expect("Invalid configuration: health_burst rate limit cannot be 0"),
+        );
 
         Self {
             transfers_limiter: RateLimiter::direct(transfers_quota),

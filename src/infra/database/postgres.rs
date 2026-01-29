@@ -225,7 +225,7 @@ impl DatabaseClient for PostgresClient {
         // Insert with nonce - uses UNIQUE constraint for idempotency
         // ON CONFLICT handles race condition: if another request with same nonce
         // was inserted between our check and insert, return the existing row
-        sqlx::query(
+        let row = sqlx::query(
             r#"
             INSERT INTO transfer_requests (
                 id, from_address, to_address, amount, token_mint,
@@ -235,6 +235,15 @@ impl DatabaseClient for PostgresClient {
                 nonce, client_signature
             ) 
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (nonce) WHERE nonce IS NOT NULL
+            DO UPDATE SET id = transfer_requests.id
+            RETURNING id, from_address, to_address, amount, token_mint,
+                      compliance_status, blockchain_status, blockchain_signature,
+                      blockchain_retry_count, blockchain_last_error, blockchain_next_retry_at,
+                      created_at, updated_at,
+                      transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                      original_tx_signature, last_error_type, blockhash_used,
+                      nonce, client_signature
             "#,
         )
         .bind(&id)
@@ -254,32 +263,12 @@ impl DatabaseClient for PostgresClient {
         .bind(range_proof)
         .bind(&data.nonce)
         .bind(&data.signature)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(|e| AppError::Database(DatabaseError::from(e)))?;
 
-        Ok(TransferRequest {
-            id,
-            from_address: data.from_address.clone(),
-            to_address: data.to_address.clone(),
-            transfer_details: data.transfer_details.clone(),
-            token_mint: data.token_mint.clone(),
-            compliance_status: ComplianceStatus::Pending,
-            blockchain_status: BlockchainStatus::Pending,
-            blockchain_signature: None,
-            blockchain_retry_count: 0,
-            blockchain_last_error: None,
-            blockchain_next_retry_at: None,
-            // Jito Double Spend Protection fields
-            original_tx_signature: None,
-            last_error_type: LastErrorType::None,
-            blockhash_used: None,
-            // Request Uniqueness fields
-            nonce: Some(data.nonce.clone()),
-            client_signature: Some(data.signature.clone()),
-            created_at: now,
-            updated_at: now,
-        })
+        // Parse the returned row (handles both new insert and existing row on conflict)
+        Self::row_to_transfer_request(&row)
     }
 
     #[instrument(skip(self))]

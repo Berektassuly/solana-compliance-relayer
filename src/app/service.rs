@@ -667,12 +667,34 @@ impl AppService {
                         .await?;
                 }
                 Err(e) => {
-                    // Error checking status - log and continue with caution
-                    warn!(
+                    // SAFETY: Cannot verify original tx status due to RPC/network error.
+                    // We MUST NOT submit a new transaction - the original might have landed.
+                    // Reschedule for later retry of the status check instead.
+                    error!(
                         id = %request.id,
                         error = %e,
-                        "Failed to check original tx status, proceeding with caution"
+                        "Failed to check original tx status - rescheduling (cannot safely retry)"
                     );
+
+                    let retry_count = self.db_client.increment_retry_count(&request.id).await?;
+                    let backoff = calculate_backoff(retry_count);
+                    self.db_client
+                        .update_blockchain_status(
+                            &request.id,
+                            BlockchainStatus::PendingSubmission,
+                            None,
+                            Some(&format!(
+                                "JitoStateUnknown: RPC error checking status - {}",
+                                e
+                            )),
+                            Some(Utc::now() + Duration::seconds(backoff)),
+                            None,
+                        )
+                        .await?;
+
+                    // Return Ok to indicate we handled this request (rescheduled, not failed)
+                    // The request stays in PendingSubmission and will be retried later
+                    return Ok(());
                 }
             }
         }
