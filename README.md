@@ -87,6 +87,17 @@ Privacy-preserving protocols on Solana face a fundamental paradox: **users deman
 
 ---
 
+## Frontend
+
+The official dashboard and UI for this relayer is a separate repository:
+
+- **Repository:** [solana-compliance-relayer-frontend](https://github.com/Berektassuly/solana-compliance-relayer-frontend)
+- **Live demo:** [solana-compliance-relayer-frontend.berektassuly.com/](https://solana-compliance-relayer-frontend.berektassuly.com/)
+
+It provides a real-time dashboard (analytics, metrics, terminal, monitor), client-side WASM signing, risk scanner, and admin blocklist management. Built with Next.js, React, Tailwind CSS, and a Rust/WASM signing module.
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -119,7 +130,7 @@ The backend runs on `http://localhost:3000`. Swagger UI is available at `/swagge
 ## Tech Stack
 
 - **Backend:** Rust 1.85+, Axum 0.8, SQLx 0.8, Tokio 1.48
-- **Frontend:** Next.js 14, Tailwind CSS, TanStack Query
+- **Frontend:** [solana-compliance-relayer-frontend](https://github.com/Berektassuly/solana-compliance-relayer-frontend) — Next.js, Tailwind CSS, Zustand, Rust/WASM signing
 - **Cryptography:** ed25519-dalek (WASM), solana-zk-sdk, ElGamal/AES
 - **RPC Providers:** Helius, QuickNode (auto-detected)
 - **Compliance:** Range Protocol Risk API
