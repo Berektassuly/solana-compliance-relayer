@@ -159,7 +159,7 @@ async fn test_blockchain_status_updates() {
         .submit_transfer(&request)
         .await
         .expect("Failed to submit transfer");
-    assert_eq!(created.blockchain_status, BlockchainStatus::Pending);
+    assert_eq!(created.blockchain_status, BlockchainStatus::Received);
 
     // Update to pending submission
     client

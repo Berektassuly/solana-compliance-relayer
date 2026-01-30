@@ -878,7 +878,7 @@ mod tests {
     fn test_quicknode_submission_config_default() {
         let config = QuickNodeSubmissionConfig::default();
         assert!(config.enable_jito_bundles);
-        assert_eq!(config.tip_lamports, 1_000);
+        assert_eq!(config.tip_lamports, 10_000); // 0.00001 SOL (recommended minimum)
         assert_eq!(config.max_bundle_retries, 2);
     }
 
