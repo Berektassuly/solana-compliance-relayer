@@ -23,7 +23,7 @@ Create a `.env` file in the project root. See [`.env.example`](../.env.example) 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius/QuickNode recommended) |
+| `SOLANA_RPC_URL` | No | Solana RPC endpoint (default: `https://api.devnet.solana.com`). Production: use Helius or QuickNode |
 | `ISSUER_PRIVATE_KEY` | Yes | Base58 relayer wallet private key |
 | `HELIUS_WEBHOOK_SECRET` | Recommended | Authorization header for Helius webhook validation |
 | `RANGE_API_KEY` | No | Range Protocol API key (mock mode if absent) |
@@ -36,7 +36,7 @@ Create a `.env` file in the project root. See [`.env.example`](../.env.example) 
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Bind interface |
 | `PORT` | `3000` | Server port |
-| `RUST_LOG` | `info` | Log level (e.g., `info,tower_http=debug,sqlx=warn`) |
+| `RUST_LOG` | `info,tower_http=debug,sqlx=warn` | Log level (e.g., `info`, `debug`, `sqlx=warn`) |
 
 ### Feature Flags
 
@@ -57,15 +57,37 @@ Create a `.env` file in the project root. See [`.env.example`](../.env.example) 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS origins; `localhost:3000` and `localhost:3001` always allowed |
+| `CORS_ALLOWED_ORIGINS` | `https://solana-compliance-relayer-frontend.berektassuly.com` | Comma-separated CORS origins; `http://localhost:3000` and `http://localhost:3001` are always allowed in addition |
+
+### Stale Transaction Crank
+
+Active polling fallback for when webhooks fail to deliver. Polls for requests stuck in "submitted" state and updates status from chain.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_STALE_CRANK` | `true` | Enable stale transaction crank (only runs when `ENABLE_BACKGROUND_WORKER` is true) |
+| `CRANK_POLL_INTERVAL_SECS` | `60` | Poll interval in seconds |
+| `CRANK_STALE_AFTER_SECS` | `90` | Consider transaction stale after this many seconds (should be ≥ blockhash validity) |
+| `CRANK_BATCH_SIZE` | `20` | Max transactions to process per crank cycle |
 
 ### Jito MEV Protection Variables (QuickNode only)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USE_JITO_BUNDLES` | `false` | Enable "Ghost Mode" - private transaction submission via Jito block builders |
-| `JITO_TIP_LAMPORTS` | `10000` | Tip amount in lamports (0.00001 SOL). Recommended: 10,000-50,000 |
+| `JITO_TIP_LAMPORTS` | `1000` | Tip amount in lamports (0.000001 SOL). Recommended: 10,000–50,000 for production |
 | `JITO_REGION` | auto | Optional region for lower latency: `ny`, `amsterdam`, `frankfurt`, `tokyo` |
+
+### Privacy Health Check Variables (QuickNode only)
+
+Tune anonymity-set health checks for confidential transfers. Only used when `ENABLE_PRIVACY_CHECKS=true` and RPC URL is QuickNode.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRIVACY_MIN_TX_THRESHOLD` | `5` | Minimum recent transactions to consider anonymity set "healthy" |
+| `PRIVACY_LOOKBACK_MINUTES` | `10` | Lookback window in minutes for activity assessment |
+| `PRIVACY_MAX_DELAY_SECS` | `120` | Maximum delay in seconds when activity is low |
+| `PRIVACY_MIN_DELAY_SECS` | `10` | Minimum delay in seconds when activity is low |
 
 ### Webhook Variables
 
@@ -78,15 +100,15 @@ Create a `.env` file in the project root. See [`.env.example`](../.env.example) 
 
 ## RPC Provider Strategy
 
-The relayer implements a **Provider Strategy Pattern** that auto-detects the RPC endpoint and activates premium features accordingly.
+The relayer implements a **Provider Strategy Pattern** that **auto-detects** the RPC provider from `SOLANA_RPC_URL`. No explicit provider env var is required. Detection is done via URL string matching at startup when the blockchain client is created.
 
 ### Provider Detection
 
 | Provider | Detection | Features Enabled |
 |----------|-----------|------------------|
-| **Helius** | URL contains `helius-rpc.com` | Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks, Enhanced Webhooks |
+| **Helius** | URL contains `helius-rpc.com` or `helius.xyz` | Priority fee estimation via `getPriorityFeeEstimate`, DAS compliance checks, Enhanced Webhooks |
 | **QuickNode** | URL contains `quiknode.pro` or `quicknode.com` | Priority fee estimation via `qn_estimatePriorityFees`, Privacy Health Check service, **Jito Bundle Submission (MEV Protection)** |
-| **Standard** | Any other RPC | Static fallback fee strategy (5000 micro-lamports) |
+| **Standard** | Any other RPC | Static fallback fee strategy (100 micro-lamports) |
 
 ### QuickNode-Specific Features
 
@@ -107,7 +129,7 @@ SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
 SOLANA_RPC_URL=https://api.devnet.solana.com
 ```
 
-> **Note:** Priority fees and DAS compliance are auto-detected from `SOLANA_RPC_URL`. Jito bundles require QuickNode with the "Lil' JIT" add-on enabled.
+> **Note:** Priority fees and DAS compliance are auto-detected from `SOLANA_RPC_URL`. Jito bundles require QuickNode with the "Lil' JIT" add-on enabled and `USE_JITO_BUNDLES=true`.
 
 ---
 
@@ -235,7 +257,7 @@ docker build -t solana-compliance-relayer .
 docker run --env-file .env -p 3000:3000 solana-compliance-relayer
 ```
 
-Ensure PostgreSQL is reachable (e.g., via `DATABASE_URL`). Use [docker-compose](../docker-compose.yml) for local PostgreSQL.
+Ensure PostgreSQL is reachable (e.g., via `DATABASE_URL`). Use [docker-compose](../docker-compose.yml) for local PostgreSQL (exposes port 5432 for DB, 3000 for app).
 
 ### Frontend (Vercel)
 
