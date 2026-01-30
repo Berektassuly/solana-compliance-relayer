@@ -32,10 +32,13 @@ Webhook endpoints validate incoming requests to prevent spoofing:
 
 | Provider | Header | Validation |
 |----------|--------|------------|
-| **Helius** | `Authorization` | Compared against `HELIUS_WEBHOOK_SECRET` env var |
-| **QuickNode** | `x-qn-signature` or `Authorization` | Compared against `QUICKNODE_WEBHOOK_SECRET` env var |
+| **Helius** | `Authorization` | Compared against `HELIUS_WEBHOOK_SECRET` env var. If configured and header missing or mismatched → `401 Unauthorized`. |
+| **QuickNode** | `x-qn-signature` or `Authorization` | Compared against `QUICKNODE_WEBHOOK_SECRET` env var. **Current behavior:** When the secret is set, missing or mismatched headers are logged but **not rejected** (validation is lenient for debugging). |
 
-If the secret is configured but the header is missing or mismatched, the request is rejected with `401 Unauthorized`.
+> [!NOTE]
+> **Helius:** If `HELIUS_WEBHOOK_SECRET` is set and the `Authorization` header is missing or does not match, the request is rejected with `401 Unauthorized`.
+>
+> **QuickNode:** If `QUICKNODE_WEBHOOK_SECRET` is set, the relayer currently accepts requests even when the header is missing or mismatched (logs only). Restrict access at the network level if strict verification is required.
 
 ### Replay Attack Protection
 
@@ -69,9 +72,14 @@ The server **tracks all nonces** in the database. Each `(from_address, nonce)` p
 | **USDC** | 6 | 1 USDC = `1,000,000` | `"amount": 1000000` |
 | **USDT** | 6 | 1 USDT = `1,000,000` | `"amount": 1000000` |
 
+**Validation:** For public transfers, `amount` must be **greater than 0** (zero is rejected with `400 Bad Request`).
+
 **Incorrect (will fail):**
 ```json
 { "amount": 1.5 }
+```
+```json
+{ "amount": 0 }
 ```
 
 **Correct:**
@@ -147,7 +155,7 @@ Submit a signed transfer request for processing.
 }
 ```
 
-**Response (201 Created / 200 OK for idempotent):**
+**Response (200 OK — new or idempotent return):**
 
 ```json
 {
@@ -217,6 +225,10 @@ Get a single transfer by ID.
 | `blockchain_signature` | string | **Yes** | On-chain tx signature (null until submitted) |
 | `blockchain_retry_count` | integer | No | Number of submission attempts |
 | `blockchain_last_error` | string | Yes | Last error message |
+| `blockchain_next_retry_at` | datetime | Yes | Next scheduled retry (ISO 8601) |
+| `original_tx_signature` | string | Yes | First submission tx signature (Jito double-spend protection) |
+| `last_error_type` | enum | No | Classification of last submission error (see below) |
+| `blockhash_used` | string | Yes | Blockhash used in last attempt |
 | `nonce` | string | Yes | Original request nonce |
 | `created_at` | datetime | No | ISO 8601 timestamp |
 | `updated_at` | datetime | No | ISO 8601 timestamp |
@@ -233,6 +245,17 @@ Get a single transfer by ID.
 | `confirmed` | **Yes** | Transaction finalized on blockchain (finalized commitment). |
 | `failed` | **Yes** | Max retries (10) exceeded. May be retryable via `POST /retry`. |
 | `expired` | **Yes** | Transaction was not confirmed within the blockhash validity window (~90s). **User must re-sign and submit a new request with a fresh nonce.** |
+
+**Last Error Type Values** (for retry strategy):
+
+| Value | Description |
+|-------|--------------|
+| `none` | No error or initial state |
+| `jito_state_unknown` | Jito bundle state unknown — verify on-chain status before retry |
+| `jito_bundle_failed` | Jito bundle rejected; safe to retry with new blockhash |
+| `transaction_failed` | Transaction failed on-chain; safe to retry |
+| `network_error` | Network/connection error; safe to retry |
+| `validation_error` | Validation error; do not retry automatically |
 
 > [!NOTE]
 > **Terminal States:** Once a transfer reaches `confirmed`, `failed`, or `expired`, no further automatic processing occurs.
@@ -279,14 +302,16 @@ Add an address to the internal blocklist.
 }
 ```
 
-**Response:**
+**Response (200 OK):**
 
 ```json
 {
   "success": true,
-  "message": "Address SuspiciousWallet123... added to blocklist"
+  "message": "Address <address> added to blocklist"
 }
 ```
+
+**Errors:** `400` if `address` or `reason` is empty; `501` if blocklist is not configured.
 
 ---
 
@@ -294,7 +319,7 @@ Add an address to the internal blocklist.
 
 List all blocklisted addresses.
 
-**Response:**
+**Response (200 OK):**
 
 ```json
 {
@@ -306,11 +331,26 @@ List all blocklisted addresses.
 }
 ```
 
+**Errors:** `501` if blocklist is not configured.
+
 ---
 
 ### DELETE /admin/blocklist/{address}
 
 Remove an address from the blocklist.
+
+**Path parameter:** `address` — Base58 wallet address to remove.
+
+**Response (200 OK):**
+
+```json
+{
+  "success": true,
+  "message": "Address <address> removed from blocklist"
+}
+```
+
+**Errors:** `404` if the address is not in the blocklist; `501` if blocklist is not configured.
 
 ---
 
@@ -383,7 +423,9 @@ Receives transaction events from QuickNode Streams/Webhooks.
 | `x-qn-signature` | `<QUICKNODE_WEBHOOK_SECRET>` | Checked first |
 | `Authorization` | `<QUICKNODE_WEBHOOK_SECRET>` | Fallback if `x-qn-signature` is absent |
 
-> [!TIP]
+> [!NOTE]
+> When `QUICKNODE_WEBHOOK_SECRET` is set, missing or mismatched headers are **not** currently rejected; the request is accepted and a warning is logged. Use network-level restrictions if strict verification is required.
+>
 > QuickNode Streams typically send `x-qn-signature`, but some configurations may use `Authorization`. The relayer accepts **either** header for flexibility.
 
 **Payload Format:** Flexible JSON (single event or array of events). The handler extracts `signature` from various nested structures.
@@ -397,9 +439,23 @@ Receives transaction events from QuickNode Streams/Webhooks.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Detailed health (database, blockchain) |
-| `GET` | `/health/live` | Kubernetes liveness (always 200) |
-| `GET` | `/health/ready` | Kubernetes readiness (checks deps) |
+| `GET` | `/health` | Detailed health (database, blockchain). Returns JSON: `status`, `database`, `blockchain`, `timestamp`, `version`. |
+| `GET` | `/health/live` | Kubernetes liveness (always 200, no body) |
+| `GET` | `/health/ready` | Kubernetes readiness (200 if healthy/degraded, 503 if unhealthy) |
+
+**GET /health response example:**
+
+```json
+{
+  "status": "healthy",
+  "database": "healthy",
+  "blockchain": "healthy",
+  "timestamp": "2026-01-30T10:30:00Z",
+  "version": "0.3.0"
+}
+```
+
+`status` values: `healthy`, `degraded`, `unhealthy`.
 
 ---
 
@@ -472,8 +528,8 @@ The message to sign is a **UTF-8 encoded string** with the following format:
 
 | Requirement | Details |
 |-------------|---------|
-| **Required** | Yes, in request body |
-| **Format** | 32-64 characters, alphanumeric with optional hyphens |
+| **Required** | Yes, in request body. Empty nonce returns `400 Bad Request`. |
+| **Format** | **32–64 characters**, **alphanumeric with optional hyphens** (e.g. UUID). Other characters are rejected. |
 | **Recommended** | UUID v4 or UUID v7 (time-ordered) |
 | **Uniqueness** | Per `(from_address, nonce)` pair |
 | **Server Tracking** | Nonces are stored in database and checked for duplicates |
@@ -494,19 +550,24 @@ The message to sign is a **UTF-8 encoded string** with the following format:
 |------|---------|
 | `200` | Success (or idempotent duplicate) |
 | `400` | Validation error (invalid signature, missing fields, wrong types) |
-| `401` | Authentication failed (webhook secret mismatch) |
+| `401` | Authentication failed (webhook secret mismatch; Helius only) |
+| `402` | Payment required (insufficient funds for transaction) |
 | `403` | Authorization denied (signature verification failed) |
 | `404` | Resource not found |
+| `409` | Conflict (duplicate record, e.g. nonce already used) |
 | `429` | Rate limit exceeded |
 | `500` | Internal server error |
 | `501` | Feature not configured (e.g., risk service) |
 | `503` | Service unavailable (database/blockchain down) |
+| `504` | Gateway timeout (upstream timeout) |
 
 ---
 
 ## Rate Limiting
 
-When enabled (`ENABLE_RATE_LIMITING=true`):
+Rate limiting is **disabled by default**. Set `ENABLE_RATE_LIMITING=true` to enable.
+
+When enabled:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -515,9 +576,14 @@ When enabled (`ENABLE_RATE_LIMITING=true`):
 
 **Response Headers:**
 
+- On success: `X-RateLimit-Limit` is set to the configured RPS (e.g. `10`). `X-RateLimit-Remaining` is not set on success.
+- On 429: `X-RateLimit-Limit`, `X-RateLimit-Remaining: 0`, and `Retry-After` (seconds until reset) are included.
+
+Example when rate limited:
+
 ```
 X-RateLimit-Limit: 10
-X-RateLimit-Remaining: 5
+X-RateLimit-Remaining: 0
 Retry-After: 1
 ```
 

@@ -68,10 +68,9 @@ The project implements **Hexagonal Architecture** to ensure clean separation bet
 │  │                    Infrastructure Layer                         │    │
 │  │  ┌──────────────────┐   ┌───────────────────┐                   │    │
 │  │  │ Background Worker│──▶│ BlockchainClient  │──▶ Helius/QN RPC │    │
-│  │  │ (SELECT FOR      │   │ (Config-Driven)   │                   │    │
-│  │  │  UPDATE SKIP     │   └───────────────────┘                   │    │
-│  │  │  LOCKED)         │                                           │    │
-│  │  └──────────────────┘                                           │    │
+│  │  │ (Atomic claim    │   │ (URL-detected     │                   │    │
+│  │  │  SKIP LOCKED)    │   │  provider)        │                   │    │
+│  │  └──────────────────┘   └───────────────────┘                   │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -83,24 +82,30 @@ The project implements **Hexagonal Architecture** to ensure clean separation bet
 ```
 src/
 ├── domain/          # Core business types and trait definitions (Ports)
-│   ├── types.rs     # TransferRequest, ComplianceStatus, BlockchainStatus
+│   ├── mod.rs       # Re-exports
+│   ├── types.rs     # TransferRequest, ComplianceStatus, BlockchainStatus, LastErrorType
 │   ├── traits.rs    # DatabaseClient, BlockchainClient, ComplianceProvider
 │   └── error.rs     # Unified error types
 ├── app/             # Application layer (Use Cases)
+│   ├── mod.rs       # Re-exports
 │   ├── service.rs   # Business logic orchestration
-│   ├── state.rs     # AppState (service, blocklist, risk_service, etc.)
+│   ├── state.rs     # AppState (service, blocklist, risk_service, webhook secrets)
 │   ├── risk_service.rs  # Pre-flight risk check (blocklist + Range + DAS)
-│   └── worker.rs    # Background worker with SKIP LOCKED + fallback polling
+│   └── worker.rs    # Background worker (SKIP LOCKED) + StaleTransactionCrank
 ├── api/             # HTTP interface (Primary Adapter)
+│   ├── mod.rs       # Re-exports
 │   ├── handlers.rs  # Axum route handlers with OpenAPI docs
 │   ├── admin.rs     # Admin API for blocklist management
 │   └── router.rs    # Rate limiting, CORS, middleware
-└── infra/           # External integrations (Secondary Adapters)
-    ├── database/    # PostgreSQL via SQLx (compile-time checked)
-    ├── blockchain/  # Solana via Helius/QuickNode/Standard RPC
-    ├── blocklist/   # Internal blocklist with DashMap + PostgreSQL
-    ├── compliance/  # Range Protocol integration
-    └── privacy/     # QuickNode Privacy Health Check (confidential transfers)
+├── infra/           # External integrations (Secondary Adapters)
+│   ├── mod.rs       # Re-exports
+│   ├── database/    # PostgreSQL via SQLx (postgres.rs)
+│   ├── blockchain/  # Helius, QuickNode, solana.rs, strategies (RpcProviderType)
+│   ├── blocklist/   # Internal blocklist with PostgreSQL
+│   ├── compliance/  # Range Protocol (range.rs)
+│   └── privacy/     # QuickNode Privacy Health Check (confidential transfers)
+├── main.rs          # Entry point, wiring
+└── lib.rs           # Crate root
 ```
 
 ---
@@ -173,12 +178,11 @@ sequenceDiagram
     participant Webhook as Webhook Handler
     participant API as Axum API
 
-    loop Every 10 seconds
+    loop Every 10 seconds (WorkerConfig.poll_interval)
         rect rgb(255, 230, 200)
-            Note over Worker,DB: SELECT ... FOR UPDATE SKIP LOCKED
-            Worker->>DB: Claim pending_submission tasks (locked)
+            Note over Worker,DB: Atomic UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING
+            Worker->>DB: Claim pending_submission → set processing, return rows
         end
-        Worker->>DB: UPDATE blockchain_status → processing
         Worker->>RPC: getLatestBlockhash()
         RPC-->>Worker: blockhash (valid ~90 seconds)
         Worker->>RPC: sendTransaction()
@@ -198,11 +202,11 @@ sequenceDiagram
         RPC->>Webhook: POST /webhooks/{provider}
         Webhook->>API: Parse confirmation
         API->>DB: UPDATE blockchain_status → confirmed
-    and Active Polling Fallback (Crank)
+    and Active Polling Fallback (StaleTransactionCrank)
         rect rgb(255, 200, 200)
-            Note over Worker: Fallback for unreliable webhooks
-            loop Every 60 seconds
-                Worker->>DB: SELECT submitted WHERE updated_at < NOW() - INTERVAL '90 seconds'
+            Note over Worker: Fallback for unreliable webhooks (ENABLE_STALE_CRANK)
+            loop Every CRANK_POLL_INTERVAL_SECS (default 60s)
+                Worker->>DB: get_stale_submitted_transactions(stale_after_secs, batch_size)
                 Worker->>RPC: getSignatureStatuses([signatures])
                 alt Transaction Confirmed (finalized commitment)
                     RPC-->>Worker: status: finalized
@@ -251,12 +255,15 @@ Transactions progress through the following states, with explicit handling for *
 | Status | Trigger | Next State |
 |--------|---------|------------|
 | `received` | Initial persistence (before compliance check) | → `rejected` or `pending_submission` |
+| `pending` | *(Legacy)* Alias for `received` in older DB rows | Same as `received` |
 | `pending_submission` | Compliance approved, queued for worker | → `processing` |
-| `processing` | Worker claimed task via SKIP LOCKED | → `submitted` (success) or retry (failure) |
-| `submitted` | Transaction sent to Solana | → `confirmed` (webhook/poll) or `expired` (blockhash expired) |
+| `processing` | Worker claimed task via UPDATE...FOR UPDATE SKIP LOCKED RETURNING | → `submitted` (success) or retry (failure) |
+| `submitted` | Transaction sent to Solana | → `confirmed` (webhook/crank) or `expired` (blockhash expired) |
 | `confirmed` | Finalized commitment received | **Terminal state** |
 | `expired` | Blockhash expired + tx not found | **Terminal state** (user must re-sign) |
 | `failed` | Max retries (10) exceeded | **Terminal state** |
+
+States are defined in `src/domain/types.rs` as the `BlockchainStatus` enum (`as_str()` yields the values above).
 
 ### Blockhash Expiry Handling
 
@@ -278,72 +285,76 @@ Transactions progress through the following states, with explicit handling for *
 
 **Problem:** Checking compliance before persisting loses records if the service crashes mid-check.
 
-**Solution:** Immediately persist with status `received`, then process asynchronously.
+**Solution:** Immediately persist with status `received`, then run compliance and update. Implemented in `src/app/service.rs` (submit_transfer) and `src/infra/database/postgres.rs` (submit_transfer uses `BlockchainStatus::Received.as_str()`).
 
 ```sql
--- Step 1: Immediate persist (API handler)
-INSERT INTO transfer_requests 
-    (id, from_address, to_address, ..., blockchain_status)
-VALUES 
-    ($1, $2, $3, ..., 'received');
+-- Step 1: Immediate persist (API handler via db_client.submit_transfer)
+-- Uses ON CONFLICT (nonce) WHERE nonce IS NOT NULL for idempotency.
+INSERT INTO transfer_requests (
+    id, from_address, to_address, ..., compliance_status, blockchain_status, ...
+) VALUES ($1, $2, $3, ..., 'pending', 'received', ...)  -- compliance_status, blockchain_status
+ON CONFLICT (nonce) WHERE nonce IS NOT NULL DO UPDATE SET id = transfer_requests.id
+RETURNING ...;
 
--- Step 2: Update after compliance (same handler)
+-- Step 2: Update after compliance (same handler, AppService)
 UPDATE transfer_requests 
 SET compliance_status = 'approved', 
     blockchain_status = 'pending_submission'
 WHERE id = $1;
 ```
 
-### 2. SELECT ... FOR UPDATE SKIP LOCKED
+### 2. UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING
 
 **Problem:** Multiple Kubernetes pods polling the same table race to process the same transaction, causing double-submissions.
 
-**Solution:** Atomic claim with `SKIP LOCKED`:
+**Solution:** Atomic claim via an **UPDATE** that selects eligible rows with `FOR UPDATE SKIP LOCKED`, then returns the updated rows in one round-trip (`src/infra/database/postgres.rs`):
 
 ```sql
-SELECT id, from_address, to_address, transfer_details, token_mint
-FROM transfer_requests
-WHERE blockchain_status = 'pending_submission'
-  AND compliance_status = 'approved'
-  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-ORDER BY created_at ASC
-LIMIT 10
-FOR UPDATE SKIP LOCKED;
+UPDATE transfer_requests
+SET blockchain_status = 'processing',
+    updated_at = NOW()
+WHERE id IN (
+    SELECT id FROM transfer_requests
+    WHERE blockchain_status = 'pending_submission'
+      AND compliance_status = 'approved'
+      AND (blockchain_next_retry_at IS NULL OR blockchain_next_retry_at <= $1)
+      AND blockchain_retry_count < 10
+    ORDER BY blockchain_next_retry_at ASC NULLS FIRST, created_at ASC
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, from_address, to_address, ...;
 ```
 
 This guarantees:
 - Each row is processed by exactly one worker
 - Workers don't block each other (SKIP vs. wait)
-- Claimed rows are invisible to other workers until committed
+- Claimed rows are updated to `processing` and returned in a single atomic operation
 
-### 3. Active Polling Fallback (Cranks)
+### 3. Active Polling Fallback (Stale Transaction Crank)
 
 **Problem:** Webhooks may fail due to network issues, provider outages, or delivery delays.
 
-**Solution:** Background crank polls `getSignatureStatuses` for transactions stuck in `submitted`:
+**Solution:** A separate **StaleTransactionCrank** (`src/app/worker.rs`) runs on a configurable interval (default 60s) and calls `get_stale_submitted_transactions(older_than_secs, limit)`. The database query (`src/infra/database/postgres.rs`) selects rows where `blockchain_status = 'submitted'` and `updated_at < NOW() - make_interval(secs => $1)` (default 90 seconds). The service then calls `get_signature_status` and `is_blockhash_valid` per transaction:
 
 ```rust
-// Pseudo-code for fallback crank
-async fn poll_stale_transactions(&self) {
-    let stale = db.get_submitted_older_than(Duration::from_secs(90)).await?;
-    
-    for tx in stale {
-        let status = rpc.get_signature_status(&tx.blockchain_signature).await?;
-        
-        match status {
-            Some(Finalized) => db.update_status(tx.id, Confirmed).await?,
-            Some(Failed(err)) => db.update_status(tx.id, Failed, err).await?,
-            None => {
-                // Transaction not found - check blockhash
-                if !rpc.is_blockhash_valid(&tx.blockhash_used).await? {
-                    db.update_status(tx.id, Expired).await?;
-                }
-                // else: blockhash still valid, wait for next poll
+// Simplified flow (AppService::process_stale_submitted_transactions)
+let stale = db_client.get_stale_submitted_transactions(older_than_secs, batch_size).await?;
+for tx in stale {
+    match blockchain_client.get_signature_status(&tx.blockchain_signature).await? {
+        Some(Confirmed | Finalized) => db.update_blockchain_status(id, Confirmed, ...).await?,
+        Some(Failed(err)) => db.update_blockchain_status(id, Failed, ..., err).await?,
+        None => {
+            if !blockchain_client.is_blockhash_valid(&tx.blockhash_used).await? {
+                db.update_blockchain_status(id, Expired, ...).await?;
             }
+            // else: blockhash still valid, wait for next crank cycle
         }
     }
 }
 ```
+
+**Configuration:** `ENABLE_STALE_CRANK`, `CRANK_POLL_INTERVAL_SECS` (default 60), `CRANK_STALE_AFTER_SECS` (default 90), `CRANK_BATCH_SIZE` (default 20).
 
 ### 4. Commitment Level: Finalized
 
@@ -361,16 +372,19 @@ All `getSignatureStatuses` and webhook processing verify `confirmationStatus == 
 
 ## Configuration & Provider Strategy
 
-### Environment-Driven Provider Selection
+### URL-Driven Provider Detection
 
-> **Enterprise Requirement:** RPC provider type is determined explicitly via environment variables, not URL auto-detection. Enterprise endpoints often use custom domains.
+> **Implementation:** RPC provider type is **detected from `SOLANA_RPC_URL`** at client build time (`src/infra/blockchain/strategies.rs`). There is no `RPC_PROVIDER_TYPE` environment variable. The URL is matched as follows:
+> - **Helius:** URL contains `helius-rpc.com` or `helius.xyz`
+> - **QuickNode:** URL contains `quiknode.pro` or `quicknode.com`
+> - **Standard:** Any other URL (e.g. `api.mainnet-beta.solana.com`, custom RPC)
 
 | Variable | Description | Values |
 |----------|-------------|--------|
-| `RPC_PROVIDER_TYPE` | Explicit provider selection | `helius`, `quicknode`, `standard` |
-| `SOLANA_RPC_URL` | RPC endpoint URL | Any valid Solana RPC |
-| `JITO_ENABLED` | Enable Jito bundle submission | `true`, `false` |
-| `JITO_TIP_LAMPORTS` | Tip amount for Jito bundles | e.g., `10000` |
+| `SOLANA_RPC_URL` | RPC endpoint URL; **also drives provider detection** | Helius/QuickNode URLs → premium features; else Standard |
+| `USE_JITO_BUNDLES` | Enable Jito bundle submission (QuickNode only) | `true`, `false` |
+| `JITO_TIP_LAMPORTS` | Tip amount for Jito bundles | e.g. `10000` |
+| `JITO_REGION` | Optional Jito region (e.g. `ny`, `amsterdam`) | Optional |
 
 ### Provider Feature Matrix
 
@@ -384,26 +398,31 @@ All `getSignatureStatuses` and webhook processing verify `confirmationStatus == 
 
 ### Port/Adapter Pattern
 
-Business logic depends only on trait definitions (ports). Infrastructure implementations (adapters) are injected at startup:
+Business logic depends only on trait definitions (ports) in `src/domain/traits.rs`. Infrastructure implementations (adapters) are constructed in `main.rs` and passed into `AppState`. The **blockchain client** is a single `RpcBlockchainClient` that internally detects provider type from `SOLANA_RPC_URL` and selects fee strategy, submission strategy, and optional Jito bundle submission:
 
 ```rust
-// Trait (Port)
+// Trait (Port) - src/domain/traits.rs
 #[async_trait]
 pub trait BlockchainClient: Send + Sync {
     async fn submit_transaction(&self, request: &TransferRequest) -> Result<(String, String), AppError>;
     async fn get_signature_status(&self, sig: &str) -> Result<Option<TransactionStatus>, AppError>;
     async fn is_blockhash_valid(&self, blockhash: &str) -> Result<bool, AppError>;
+    // ... health_check, check_wallet_assets, etc.
 }
 
-// Adapter injection at startup
-let blockchain_client: Arc<dyn BlockchainClient> = match provider_type {
-    ProviderType::Helius => Arc::new(HeliusClient::new(rpc_url)),
-    ProviderType::QuickNode => Arc::new(QuickNodeClient::new(rpc_url)),
-    ProviderType::Standard => Arc::new(StandardRpcClient::new(rpc_url)),
-};
+// Adapter construction - main.rs uses RpcBlockchainClient::with_defaults_and_submission_strategy().
+// Provider type is detected from config.blockchain_rpc_url via RpcProviderType::detect(url).
+// No separate RPC_PROVIDER_TYPE env var; URL drives Helius vs QuickNode vs Standard behavior.
+let provider_type = RpcProviderType::detect(&config.blockchain_rpc_url);
+let blockchain_client = RpcBlockchainClient::with_defaults_and_submission_strategy(
+    &config.blockchain_rpc_url,
+    config.signing_key,
+    submission_strategy,  // Optional Jito when USE_JITO_BUNDLES and QuickNode
+    jito_tip_for_client,
+)?;
 ```
 
 This enables:
-- Easy testing with mock implementations
-- Provider swaps without code changes
-- Clear dependency boundaries
+- Easy testing with mock implementations (`test_utils/mocks.rs`)
+- Provider behavior derived from URL without a separate config key
+- Clear dependency boundaries (domain traits, infra implementations)
