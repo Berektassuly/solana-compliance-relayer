@@ -495,6 +495,6 @@ PRs touching these areas will be held for security review before merging.
 
 - Open a [Discussion](https://github.com/Berektassuly/solana-compliance-relayer/discussions) for general questions
 - Check existing [Issues](https://github.com/Berektassuly/solana-compliance-relayer/issues) before opening new ones
-- Review the [Technical Operations Guide](docs/GUIDE.md) for architecture details
+- Review the [Technical Operations Guide](docs/OPERATIONS.md) for architecture details
 
 Thank you for contributing to a more secure and compliant Solana ecosystem.

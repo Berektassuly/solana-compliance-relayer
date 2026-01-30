@@ -136,7 +136,7 @@ The backend runs on `http://localhost:3000`. Swagger UI is available at `/swagge
 | [API Reference](docs/API_REFERENCE.md) | Endpoints, signing message format, and example requests |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, RPC provider strategy, deployment |
 | [Client Integration](docs/CLIENT_INTEGRATION.md) | SDK integration notes and CLI tools |
-| [Guide](docs/GUIDE.md) | Step-by-step usage guide |
+| [Technical Operations Guide](docs/OPERATIONS.md) | Infrastructure config, database ops, and troubleshooting |
 | [Contributing](CONTRIBUTING.md) | Contribution guidelines |
 
 ---
