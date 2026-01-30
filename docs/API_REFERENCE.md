@@ -171,6 +171,9 @@ Submit a signed transfer request for processing.
 }
 ```
 
+> [!NOTE]
+> **Processing Flow:** The request is first persisted with status `received`, then compliance checks run synchronously. If approved, the response shows `blockchain_status: "pending_submission"`. If rejected, the response shows `blockchain_status: "failed"` with an error message.
+
 ---
 
 ### GET /transfer-requests
@@ -220,14 +223,22 @@ Get a single transfer by ID.
 
 **Blockchain Status Values:**
 
-| Status | Description |
-|--------|-------------|
-| `pending` | Initial state |
-| `pending_submission` | Queued for background worker |
-| `processing` | Worker is submitting |
-| `submitted` | On-chain, awaiting confirmation |
-| `confirmed` | Finalized on blockchain |
-| `failed` | Max retries exceeded |
+| Status | Terminal | Description |
+|--------|----------|-------------|
+| `received` | No | Initial state. Request persisted immediately before compliance checks. |
+| `pending` | No | *(Legacy/Deprecated)* Alias for `received` in older records. |
+| `pending_submission` | No | Compliance approved, queued for background worker. |
+| `processing` | No | Worker has claimed the task, submission in progress. |
+| `submitted` | No | Transaction sent to Solana, awaiting confirmation via webhook or polling. |
+| `confirmed` | **Yes** | Transaction finalized on blockchain (finalized commitment). |
+| `failed` | **Yes** | Max retries (10) exceeded. May be retryable via `POST /retry`. |
+| `expired` | **Yes** | Transaction was not confirmed within the blockhash validity window (~90s). **User must re-sign and submit a new request with a fresh nonce.** |
+
+> [!NOTE]
+> **Terminal States:** Once a transfer reaches `confirmed`, `failed`, or `expired`, no further automatic processing occurs.
+> - `confirmed`: Success - funds transferred.
+> - `failed`: Can be manually retried via `POST /transfer-requests/{id}/retry` if the underlying issue is resolved.
+> - `expired`: **Cannot be retried.** The original signature is permanently invalid. The user must create and sign a new request.
 
 ---
 
@@ -235,7 +246,18 @@ Get a single transfer by ID.
 
 Manually retry a failed submission.
 
-**Eligibility:** Only requests with `blockchain_status` of `pending_submission` or `failed` can be retried.
+**Eligibility:**
+
+| Status | Retryable | Notes |
+|--------|-----------|-------|
+| `pending_submission` | ✅ Yes | Re-queues for immediate processing |
+| `failed` | ✅ Yes | Resets retry count and re-queues |
+| `expired` | ❌ No | Blockhash expired; user must submit a **new request with fresh nonce** |
+| `confirmed` | ❌ No | Already successful |
+| `rejected` | ❌ No | Compliance rejected (unless blocklist entry removed) |
+
+> [!WARNING]
+> **Expired transfers cannot be retried.** The original transaction signature was built with an expired blockhash and can never be confirmed on Solana. The user must create a new transfer request with a fresh nonce and signature.
 
 ---
 
@@ -354,13 +376,17 @@ Authorization: <HELIUS_WEBHOOK_SECRET>
 
 Receives transaction events from QuickNode Streams/Webhooks.
 
-**Required Header:**
+**Authentication Header (one of):**
 
-```
-x-qn-signature/Authorization: <QUICKNODE_WEBHOOK_SECRET>
-```
+| Header | Format | Priority |
+|--------|--------|----------|
+| `x-qn-signature` | `<QUICKNODE_WEBHOOK_SECRET>` | Checked first |
+| `Authorization` | `<QUICKNODE_WEBHOOK_SECRET>` | Fallback if `x-qn-signature` is absent |
 
-**Payload Format:** Flexible JSON. The handler extracts `signature` from various nested structures.
+> [!TIP]
+> QuickNode Streams typically send `x-qn-signature`, but some configurations may use `Authorization`. The relayer accepts **either** header for flexibility.
+
+**Payload Format:** Flexible JSON (single event or array of events). The handler extracts `signature` from various nested structures.
 
 > [!NOTE]
 > Network fees, priority fees, and compute unit limits are **automatically calculated** by the relayer based on the detected RPC provider (Helius, QuickNode, or standard).
