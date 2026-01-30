@@ -15,7 +15,8 @@ use solana_compliance_relayer::api::{
     RateLimitConfig, create_router, create_router_with_rate_limit,
 };
 use solana_compliance_relayer::app::{
-    AppState, RiskService, WorkerConfig, spawn_worker, spawn_worker_with_privacy,
+    AppState, CrankConfig, RiskService, WorkerConfig, spawn_crank, spawn_worker,
+    spawn_worker_with_privacy,
 };
 use solana_compliance_relayer::infra::RpcBlockchainClient;
 use solana_compliance_relayer::infra::blockchain::{
@@ -57,6 +58,14 @@ struct Config {
     use_jito_bundles: bool,
     /// Jito tip amount in lamports (default: 1000 = 0.000001 SOL)
     jito_tip_lamports: u64,
+    /// Enable stale transaction crank (active polling fallback for webhook failures)
+    enable_stale_crank: bool,
+    /// Crank poll interval in seconds (default: 60)
+    crank_poll_interval_secs: u64,
+    /// Consider transactions stale after this many seconds (default: 90)
+    crank_stale_after_secs: i64,
+    /// Number of stale transactions to process per crank cycle (default: 20)
+    crank_batch_size: i64,
 }
 
 impl Config {
@@ -115,6 +124,26 @@ impl Config {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1_000); // Default: 0.000001 SOL
 
+        // Stale transaction crank configuration (active polling fallback)
+        let enable_stale_crank = env::var("ENABLE_STALE_CRANK")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true); // Enabled by default for reliability
+
+        let crank_poll_interval_secs = env::var("CRANK_POLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60); // Default: 60 seconds
+
+        let crank_stale_after_secs = env::var("CRANK_STALE_AFTER_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(90); // Default: 90 seconds (blockhash validity window)
+
+        let crank_batch_size = env::var("CRANK_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(20); // Default: 20 transactions per cycle
+
         let worker_config = WorkerConfig {
             enabled: enable_background_worker,
             enable_privacy_checks,
@@ -139,6 +168,10 @@ impl Config {
             enable_privacy_checks,
             use_jito_bundles,
             jito_tip_lamports,
+            enable_stale_crank,
+            crank_poll_interval_secs,
+            crank_stale_after_secs,
+            crank_batch_size,
         })
     }
 
@@ -392,6 +425,29 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Start stale transaction crank (active polling fallback for webhook failures)
+    let crank_shutdown_tx = if config.enable_stale_crank && config.enable_background_worker {
+        let crank_config = CrankConfig {
+            poll_interval: std::time::Duration::from_secs(config.crank_poll_interval_secs),
+            stale_after_secs: config.crank_stale_after_secs,
+            batch_size: config.crank_batch_size,
+            enabled: true,
+        };
+        let (_crank_handle, shutdown_tx) =
+            spawn_crank(Arc::clone(&app_state.service), crank_config);
+        info!(
+            "   ✓ Stale transaction crank started (poll: {}s, stale_after: {}s)",
+            config.crank_poll_interval_secs, config.crank_stale_after_secs
+        );
+        Some(shutdown_tx)
+    } else if !config.enable_stale_crank {
+        info!("   ○ Stale transaction crank disabled");
+        None
+    } else {
+        // Background worker disabled, so crank is also disabled
+        None
+    };
+
     // Create router
     let router = if config.enable_rate_limiting {
         info!("   ✓ Rate limiting enabled");
@@ -412,8 +468,11 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // Signal worker to shutdown
+    // Signal worker and crank to shutdown
     if let Some(tx) = worker_shutdown_tx {
+        let _ = tx.send(true);
+    }
+    if let Some(tx) = crank_shutdown_tx {
         let _ = tx.send(true);
     }
 

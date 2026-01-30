@@ -12,31 +12,44 @@ use crate::domain::AppError;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockchainStatus {
-    /// Initial state, not yet processed
+    /// Initial state - request received and persisted, awaiting compliance check
+    /// (Receive → Persist → Process pattern: persist BEFORE compliance)
     #[default]
+    Received,
+    /// Legacy initial state (kept for backward compatibility with existing DB rows)
     Pending,
-    /// Waiting to be submitted to blockchain (queued for worker)
+    /// Waiting to be submitted to blockchain (queued for worker after compliance approval)
     PendingSubmission,
     /// Worker has claimed this task, processing in progress
     Processing,
     /// Transaction submitted, awaiting confirmation
     Submitted,
-    /// Transaction confirmed on blockchain
+    /// Transaction confirmed on blockchain (finalized commitment)
     Confirmed,
     /// Submission failed after max retries
     Failed,
+    /// Blockhash expired and transaction was not found on-chain.
+    /// Terminal state - user must re-sign with a fresh nonce.
+    Expired,
 }
 
 impl BlockchainStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Received => "received",
             Self::Pending => "pending",
             Self::PendingSubmission => "pending_submission",
             Self::Processing => "processing",
             Self::Submitted => "submitted",
             Self::Confirmed => "confirmed",
             Self::Failed => "failed",
+            Self::Expired => "expired",
         }
+    }
+
+    /// Check if this is a terminal state (no further transitions possible)
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Confirmed | Self::Failed | Self::Expired)
     }
 }
 
@@ -45,12 +58,14 @@ impl std::str::FromStr for BlockchainStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "received" => Ok(Self::Received),
             "pending" => Ok(Self::Pending),
             "pending_submission" => Ok(Self::PendingSubmission),
             "processing" => Ok(Self::Processing),
             "submitted" => Ok(Self::Submitted),
             "confirmed" => Ok(Self::Confirmed),
             "failed" => Ok(Self::Failed),
+            "expired" => Ok(Self::Expired),
             _ => Err(format!("Invalid blockchain status: {}", s)),
         }
     }

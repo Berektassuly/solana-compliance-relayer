@@ -116,6 +116,30 @@ pub trait DatabaseClient: Send + Sync {
     }
 
     // =========================================================================
+    // Active Polling Fallback (Crank) Methods
+    // =========================================================================
+
+    /// Get transactions stuck in `submitted` state for longer than the specified duration.
+    /// Used by the active polling fallback (crank) to detect stale transactions
+    /// that may not have received webhook confirmation.
+    ///
+    /// # Arguments
+    /// * `older_than_secs` - Only return transactions with `updated_at` older than this many seconds
+    /// * `limit` - Maximum number of transactions to return
+    ///
+    /// # Returns
+    /// Transactions in `submitted` status that haven't been updated recently.
+    /// The crank should check their on-chain status via `getSignatureStatuses`.
+    async fn get_stale_submitted_transactions(
+        &self,
+        older_than_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<TransferRequest>, AppError> {
+        let _ = (older_than_secs, limit);
+        Ok(vec![])
+    }
+
+    // =========================================================================
     // Risk Profile Methods (for pre-flight compliance screening cache)
     // =========================================================================
 

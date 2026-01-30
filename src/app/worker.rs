@@ -208,6 +208,135 @@ pub fn spawn_worker_with_privacy(
     (handle, shutdown_tx)
 }
 
+// =============================================================================
+// Stale Transaction Crank (Active Polling Fallback)
+// =============================================================================
+
+/// Configuration for the stale transaction crank
+#[derive(Debug, Clone)]
+pub struct CrankConfig {
+    /// Interval between crank cycles (default: 60 seconds)
+    pub poll_interval: Duration,
+    /// Consider transactions stale after this many seconds (default: 90 seconds)
+    pub stale_after_secs: i64,
+    /// Number of stale transactions to process per cycle
+    pub batch_size: i64,
+    /// Whether the crank is enabled
+    pub enabled: bool,
+}
+
+impl Default for CrankConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(60),
+            stale_after_secs: 90,
+            batch_size: 20,
+            enabled: true,
+        }
+    }
+}
+
+/// Stale Transaction Crank for handling webhook failures (Active Polling Fallback).
+///
+/// This worker runs independently of the main blockchain retry worker and polls
+/// for transactions stuck in `submitted` state. It checks their on-chain status
+/// and updates them to `Confirmed` or `Expired` as appropriate.
+///
+/// Per ARCHITECTURE.md:
+/// - Polls every 60 seconds
+/// - Targets transactions with `blockchain_status = 'submitted'` AND `updated_at < NOW() - 90s`
+/// - Self-healing: handles webhook delivery failures automatically
+pub struct StaleTransactionCrank {
+    service: Arc<AppService>,
+    config: CrankConfig,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+impl StaleTransactionCrank {
+    /// Create a new crank instance
+    pub fn new(
+        service: Arc<AppService>,
+        config: CrankConfig,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            service,
+            config,
+            shutdown_rx,
+        }
+    }
+
+    /// Run the crank loop
+    pub async fn run(mut self) {
+        if !self.config.enabled {
+            info!("Stale transaction crank is disabled");
+            return;
+        }
+
+        info!(
+            poll_interval = ?self.config.poll_interval,
+            stale_after_secs = self.config.stale_after_secs,
+            batch_size = self.config.batch_size,
+            "Starting stale transaction crank (active polling fallback)"
+        );
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(self.config.poll_interval) => {
+                    self.process_stale().await;
+                }
+                result = self.shutdown_rx.changed() => {
+                    if result.is_ok() && *self.shutdown_rx.borrow() {
+                        info!("Stale transaction crank shutting down");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute a single tick of the crank loop (for testing)
+    pub async fn run_once(&self) {
+        if !self.config.enabled {
+            return;
+        }
+        self.process_stale().await;
+    }
+
+    /// Process stale submitted transactions
+    async fn process_stale(&self) {
+        match self
+            .service
+            .process_stale_submitted_transactions(
+                self.config.stale_after_secs,
+                self.config.batch_size,
+            )
+            .await
+        {
+            Ok(0) => {
+                debug!("No stale submitted transactions to process");
+            }
+            Ok(count) => {
+                info!(count = count, "Processed stale submitted transactions");
+            }
+            Err(e) => {
+                error!(error = ?e, "Error processing stale submitted transactions");
+            }
+        }
+    }
+}
+
+/// Spawn the stale transaction crank as a tokio task
+pub fn spawn_crank(
+    service: Arc<AppService>,
+    config: CrankConfig,
+) -> (tokio::task::JoinHandle<()>, watch::Sender<bool>) {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let crank = StaleTransactionCrank::new(service, config, shutdown_rx);
+    let handle = tokio::spawn(crank.run());
+    (handle, shutdown_tx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

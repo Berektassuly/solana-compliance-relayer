@@ -82,8 +82,14 @@ impl AppService {
     }
 
     /// Submit a new transfer request for background processing.
-    /// Validates, checks compliance, persists to database, and returns immediately.
-    /// Blockchain submission is handled asynchronously by background workers.
+    /// Implements the **Receive → Persist → Process** pattern for 100% auditability.
+    ///
+    /// ## Flow
+    /// 1. Validate request and verify signature
+    /// 2. Check idempotency (return existing if nonce matches)
+    /// 3. **PERSIST immediately** with status `Received` (audit trail)
+    /// 4. Run compliance checks (blocklist + Range Protocol)
+    /// 5. Update status to `PendingSubmission` (approved) or `Failed` (rejected)
     ///
     /// ## Replay Protection & Idempotency
     /// The `nonce` field in the request must be unique per sender address.
@@ -96,21 +102,22 @@ impl AppService {
         &self,
         request: &SubmitTransferRequest,
     ) -> Result<TransferRequest, AppError> {
-        // Validation first (includes nonce format validation)
+        // =====================================================================
+        // STEP 1: Validation (before any persistence)
+        // =====================================================================
         request.validate().map_err(|e| {
             warn!(error = %e, "Validation failed");
             AppError::Validation(ValidationError::Multiple(e.to_string()))
         })?;
 
-        // Cryptographic signature verification (now includes nonce in message)
+        // Cryptographic signature verification (includes nonce in message)
         // Format: "{from}:{to}:{amount|confidential}:{mint|SOL}:{nonce}"
         request.verify_signature().map_err(|e| {
             warn!(from = %request.from_address, nonce = %request.nonce, error = %e, "Signature verification failed");
             e
         })?;
 
-        // Defense in depth: Check for existing request with same nonce
-        // (Primary check is in API handler, this is secondary protection)
+        // Check for existing request with same nonce (idempotency)
         if let Some(existing) = self
             .find_by_nonce(&request.from_address, &request.nonce)
             .await?
@@ -118,101 +125,58 @@ impl AppService {
             info!(
                 nonce = %request.nonce,
                 existing_id = %existing.id,
-                "Idempotent return: existing request found for nonce (defense in depth)"
+                "Idempotent return: existing request found for nonce"
             );
             return Ok(existing);
         }
 
-        info!("Submitting new transfer request");
+        // =====================================================================
+        // STEP 2: PERSIST IMMEDIATELY (Audit Trail - before compliance check!)
+        // =====================================================================
+        // This ensures 100% auditability: if the service crashes during compliance
+        // check, the record still exists in the database with status `Received`.
+        info!("Persisting transfer request with status 'received'");
+        let mut transfer_request = self.db_client.submit_transfer(request).await?;
+        let request_id = transfer_request.id.clone();
 
-        // Internal blocklist check (fast O(1) lookup - before external API call)
-        // Check both sender and recipient addresses
+        // =====================================================================
+        // STEP 3: Compliance Checks (blocklist + Range Protocol)
+        // =====================================================================
+
+        // Internal blocklist check (fast O(1) lookup)
         if let Some(ref blocklist) = self.blocklist {
-            // Check recipient first (more common case)
+            // Check recipient
             if let Some(reason) = blocklist.check_address(&request.to_address) {
                 warn!(
                     address = %request.to_address,
                     reason = %reason,
                     "Transfer blocked: recipient in internal blocklist"
                 );
-                // Persist with rejected status and store the reason
-                let mut transfer_request = self.db_client.submit_transfer(request).await?;
-                self.db_client
-                    .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
-                    .await?;
-                // Store the blocklist reason and mark as failed
-                self.db_client
-                    .update_blockchain_status(
-                        &transfer_request.id,
-                        BlockchainStatus::Failed,
-                        None,
-                        Some(&format!("Blocklist: {}", reason)),
-                        None,
-                        None,
-                    )
-                    .await?;
-                transfer_request.compliance_status = ComplianceStatus::Rejected;
-                transfer_request.blockchain_status = BlockchainStatus::Failed;
-                transfer_request.blockchain_last_error = Some(format!("Blocklist: {}", reason));
-                return Ok(transfer_request);
+                return self
+                    .reject_transfer(&request_id, &format!("Blocklist: {}", reason))
+                    .await;
             }
 
-            // Check sender address
+            // Check sender
             if let Some(reason) = blocklist.check_address(&request.from_address) {
                 warn!(
                     address = %request.from_address,
                     reason = %reason,
                     "Transfer blocked: sender in internal blocklist"
                 );
-                // Persist with rejected status and store the reason
-                let mut transfer_request = self.db_client.submit_transfer(request).await?;
-                self.db_client
-                    .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
-                    .await?;
-                // Store the blocklist reason and mark as failed
-                self.db_client
-                    .update_blockchain_status(
-                        &transfer_request.id,
-                        BlockchainStatus::Failed,
-                        None,
-                        Some(&format!("Blocklist: {}", reason)),
-                        None,
-                        None,
-                    )
-                    .await?;
-                transfer_request.compliance_status = ComplianceStatus::Rejected;
-                transfer_request.blockchain_status = BlockchainStatus::Failed;
-                transfer_request.blockchain_last_error = Some(format!("Blocklist: {}", reason));
-                return Ok(transfer_request);
+                return self
+                    .reject_transfer(&request_id, &format!("Blocklist: {}", reason))
+                    .await;
             }
         }
 
-        // External compliance check (synchronous - slower)
+        // External compliance check (Range Protocol - slower, external API)
         let compliance_status = self.compliance_provider.check_compliance(request).await?;
 
-        // If rejected by Range, persist with Failed status AND auto-add to blocklist
         if compliance_status == crate::domain::ComplianceStatus::Rejected {
             warn!(from = %request.from_address, to = %request.to_address, "Transfer rejected by compliance provider");
 
             let rejection_reason = "Range Protocol: High-risk address detected (CRITICAL RISK)";
-
-            // Persist transfer with rejected status
-            let mut transfer_request = self.db_client.submit_transfer(request).await?;
-            self.db_client
-                .update_compliance_status(&transfer_request.id, ComplianceStatus::Rejected)
-                .await?;
-
-            // Mark as Failed with reason (same pattern as blocklist)
-            self.db_client
-                .update_blockchain_status(
-                    &transfer_request.id,
-                    BlockchainStatus::Failed,
-                    None,
-                    Some(rejection_reason),
-                    None,
-                    None,
-                )
-                .await?;
 
             // Auto-add to internal blocklist to avoid future API calls
             if let Some(ref blocklist) = self.blocklist
@@ -230,23 +194,21 @@ impl AppService {
                     .await;
             }
 
-            transfer_request.compliance_status = ComplianceStatus::Rejected;
-            transfer_request.blockchain_status = BlockchainStatus::Failed;
-            transfer_request.blockchain_last_error = Some(rejection_reason.to_string());
-            return Ok(transfer_request);
+            return self.reject_transfer(&request_id, rejection_reason).await;
         }
 
-        // Compliance passed - persist to database (single source of truth)
-        let mut transfer_request = self.db_client.submit_transfer(request).await?;
+        // =====================================================================
+        // STEP 4: Approve and Queue for Background Processing
+        // =====================================================================
         self.db_client
-            .update_compliance_status(&transfer_request.id, ComplianceStatus::Approved)
+            .update_compliance_status(&request_id, ComplianceStatus::Approved)
             .await?;
         transfer_request.compliance_status = ComplianceStatus::Approved;
 
-        // Queue for background processing (Outbox Pattern: no blockchain call here!)
+        // Queue for background worker (Outbox Pattern: no blockchain call here!)
         self.db_client
             .update_blockchain_status(
-                &transfer_request.id,
+                &request_id,
                 BlockchainStatus::PendingSubmission,
                 None,
                 None,
@@ -256,9 +218,27 @@ impl AppService {
             .await?;
         transfer_request.blockchain_status = BlockchainStatus::PendingSubmission;
 
-        info!(id = %transfer_request.id, "Transfer accepted for background processing");
+        info!(id = %transfer_request.id, "Transfer approved and queued for background processing");
 
         Ok(transfer_request)
+    }
+
+    /// Internal helper to reject a transfer request (used after persist)
+    async fn reject_transfer(&self, id: &str, reason: &str) -> Result<TransferRequest, AppError> {
+        self.db_client
+            .update_compliance_status(id, ComplianceStatus::Rejected)
+            .await?;
+        self.db_client
+            .update_blockchain_status(id, BlockchainStatus::Failed, None, Some(reason), None, None)
+            .await?;
+
+        // Fetch and return the updated request
+        self.db_client
+            .get_transfer_request(id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Database(crate::domain::DatabaseError::NotFound(id.to_string()))
+            })
     }
 
     /// Get a transfer request by ID
@@ -780,6 +760,175 @@ impl AppService {
                         .update_jito_tracking(&request.id, None, error_type, None)
                         .await?;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Active Polling Fallback (Crank) for Stale Submitted Transactions
+    // =========================================================================
+
+    /// Process transactions stuck in `submitted` state (Active Polling Fallback / Crank).
+    ///
+    /// This method implements the fallback for webhook unreliability:
+    /// 1. Query DB for transactions in `submitted` status older than `older_than_secs`
+    /// 2. For each transaction, check on-chain status via `getSignatureStatuses`
+    /// 3. Update status based on result:
+    ///    - Confirmed/Finalized → `Confirmed`
+    ///    - Not Found + Blockhash Expired → `Expired` (terminal, user must re-sign)
+    ///    - Not Found + Blockhash Valid → Wait (next crank cycle)
+    ///
+    /// This is a self-healing mechanism that handles webhook failures.
+    #[instrument(skip(self))]
+    pub async fn process_stale_submitted_transactions(
+        &self,
+        older_than_secs: i64,
+        batch_size: i64,
+    ) -> Result<usize, AppError> {
+        let stale_transactions = self
+            .db_client
+            .get_stale_submitted_transactions(older_than_secs, batch_size)
+            .await?;
+
+        let count = stale_transactions.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        info!(
+            count = count,
+            older_than_secs = older_than_secs,
+            "Processing stale submitted transactions (crank)"
+        );
+
+        for tx in stale_transactions {
+            if let Err(e) = self.check_stale_transaction_status(&tx).await {
+                error!(id = %tx.id, error = ?e, "Failed to check stale transaction status");
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Check the on-chain status of a single stale submitted transaction.
+    async fn check_stale_transaction_status(&self, tx: &TransferRequest) -> Result<(), AppError> {
+        let signature = match &tx.blockchain_signature {
+            Some(sig) => sig,
+            None => {
+                // No signature stored - shouldn't happen for submitted status
+                warn!(id = %tx.id, "Stale transaction has no signature - marking as failed");
+                self.db_client
+                    .update_blockchain_status(
+                        &tx.id,
+                        BlockchainStatus::Failed,
+                        None,
+                        Some("No blockchain signature found for submitted transaction"),
+                        None,
+                        None,
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        info!(id = %tx.id, signature = %signature, "Checking stale transaction status on-chain");
+
+        // Query blockchain for transaction status
+        match self.blockchain_client.get_signature_status(signature).await {
+            Ok(Some(TransactionStatus::Confirmed | TransactionStatus::Finalized)) => {
+                // Transaction confirmed! Webhook missed it.
+                info!(
+                    id = %tx.id,
+                    signature = %signature,
+                    "Stale transaction confirmed on-chain (webhook missed)"
+                );
+                self.db_client
+                    .update_blockchain_status(
+                        &tx.id,
+                        BlockchainStatus::Confirmed,
+                        Some(signature),
+                        None,
+                        None,
+                        tx.blockhash_used.as_deref(),
+                    )
+                    .await?;
+            }
+            Ok(Some(TransactionStatus::Failed(err))) => {
+                // Transaction failed on-chain
+                warn!(id = %tx.id, error = %err, "Stale transaction failed on-chain");
+                self.db_client
+                    .update_blockchain_status(
+                        &tx.id,
+                        BlockchainStatus::Failed,
+                        Some(signature),
+                        Some(&format!("Transaction failed on-chain: {}", err)),
+                        None,
+                        tx.blockhash_used.as_deref(),
+                    )
+                    .await?;
+            }
+            Ok(None) => {
+                // Transaction not found - check if blockhash expired
+                info!(id = %tx.id, "Transaction not found on-chain - checking blockhash validity");
+                self.handle_not_found_transaction(tx, signature).await?;
+            }
+            Err(e) => {
+                // RPC error - log and leave for next crank cycle
+                warn!(id = %tx.id, error = ?e, "Failed to query transaction status - will retry next cycle");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a transaction that was not found on-chain.
+    /// If blockhash is expired, mark as `Expired` (terminal state).
+    async fn handle_not_found_transaction(
+        &self,
+        tx: &TransferRequest,
+        signature: &str,
+    ) -> Result<(), AppError> {
+        let blockhash = match &tx.blockhash_used {
+            Some(bh) => bh,
+            None => {
+                // No blockhash stored - can't determine expiry, leave for next cycle
+                warn!(id = %tx.id, "No blockhash stored - cannot determine expiry");
+                return Ok(());
+            }
+        };
+
+        // Check if blockhash is still valid
+        match self.blockchain_client.is_blockhash_valid(blockhash).await {
+            Ok(true) => {
+                // Blockhash still valid - transaction might still land
+                info!(id = %tx.id, "Blockhash still valid - transaction may still land");
+                // Leave in submitted state, will check again next cycle
+            }
+            Ok(false) => {
+                // Blockhash expired + transaction not found = transaction will never land
+                // This is a TERMINAL state - user must re-sign with fresh nonce
+                warn!(
+                    id = %tx.id,
+                    signature = %signature,
+                    blockhash = %blockhash,
+                    "Blockhash expired and transaction not found - marking as EXPIRED"
+                );
+                self.db_client
+                    .update_blockchain_status(
+                        &tx.id,
+                        BlockchainStatus::Expired,
+                        Some(signature),
+                        Some("Transaction blockhash expired - please re-sign and submit with fresh nonce"),
+                        None,
+                        Some(blockhash),
+                    )
+                    .await?;
+            }
+            Err(e) => {
+                // RPC error - log and leave for next cycle
+                warn!(id = %tx.id, error = ?e, "Failed to check blockhash validity - will retry next cycle");
             }
         }
 

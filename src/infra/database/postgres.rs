@@ -252,7 +252,7 @@ impl DatabaseClient for PostgresClient {
         .bind(amount)
         .bind(data.token_mint.as_deref())
         .bind(ComplianceStatus::Pending.as_str())
-        .bind(BlockchainStatus::Pending.as_str())
+        .bind(BlockchainStatus::Received.as_str())  // Receive→Persist→Process: persist BEFORE compliance
         .bind(0i32)
         .bind(now)
         .bind(now)
@@ -590,6 +590,43 @@ impl DatabaseClient for PostgresClient {
         .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Active Polling Fallback (Crank) Methods
+    // =========================================================================
+
+    /// Get transactions stuck in `submitted` state for longer than the specified duration.
+    /// Used by the active polling fallback (crank) to detect stale transactions.
+    #[instrument(skip(self))]
+    async fn get_stale_submitted_transactions(
+        &self,
+        older_than_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<TransferRequest>, AppError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, from_address, to_address, amount, token_mint, compliance_status,
+                   blockchain_status, blockchain_signature, blockchain_retry_count,
+                   blockchain_last_error, blockchain_next_retry_at,
+                   created_at, updated_at,
+                   transfer_type, new_decryptable_available_balance, equality_proof, ciphertext_validity_proof, range_proof,
+                   original_tx_signature, last_error_type, blockhash_used,
+                   nonce, client_signature
+            FROM transfer_requests
+            WHERE blockchain_status = 'submitted'
+              AND updated_at < NOW() - make_interval(secs => $1)
+            ORDER BY updated_at ASC
+            LIMIT $2
+            "#,
+        )
+        .bind(older_than_secs as f64)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        rows.iter().map(Self::row_to_transfer_request).collect()
     }
 
     // =========================================================================
