@@ -90,7 +90,8 @@ impl BlockchainRetryWorker {
         info!(
             poll_interval = ?self.config.poll_interval,
             batch_size = self.config.batch_size,
-            "Starting blockchain retry worker"
+            "Starting blockchain retry worker (first poll in {:?})",
+            self.config.poll_interval
         );
 
         loop {
@@ -119,13 +120,18 @@ impl BlockchainRetryWorker {
 
     /// Process a batch of pending submissions
     pub async fn process_batch(&self) {
+        debug!(
+            "Worker polling for pending submissions (batch_size: {})",
+            self.config.batch_size
+        );
         match self
             .service
             .process_pending_submissions(self.config.batch_size)
             .await
         {
             Ok(0) => {
-                // No pending items, nothing to log
+                // No pending items - debug log for troubleshooting
+                debug!("No pending blockchain submissions found");
             }
             Ok(count) => {
                 info!(count = count, "Processed pending blockchain submissions");

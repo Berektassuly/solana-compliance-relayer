@@ -362,7 +362,7 @@ impl DatabaseClient for PostgresClient {
         Ok(PaginatedResponse::new(requests, next_cursor, has_more))
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id, status = %status.as_str()))]
     async fn update_blockchain_status(
         &self,
         id: &str,
@@ -374,7 +374,7 @@ impl DatabaseClient for PostgresClient {
     ) -> Result<(), AppError> {
         let now = Utc::now();
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE transfer_requests 
             SET blockchain_status = $1,
@@ -397,17 +397,24 @@ impl DatabaseClient for PostgresClient {
         .await
         .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
 
+        // Verify the update actually affected a row
+        if result.rows_affected() == 0 {
+            tracing::warn!(id = %id, "update_blockchain_status: no rows affected (record may not exist)");
+            return Err(AppError::Database(DatabaseError::NotFound(id.to_string())));
+        }
+
+        tracing::debug!(id = %id, status = %status.as_str(), "Blockchain status updated");
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id, status = %status.as_str()))]
     async fn update_compliance_status(
         &self,
         id: &str,
         status: ComplianceStatus,
     ) -> Result<(), AppError> {
         let now = Utc::now();
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE transfer_requests 
             SET compliance_status = $1,
@@ -422,18 +429,30 @@ impl DatabaseClient for PostgresClient {
         .await
         .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
 
+        // Verify the update actually affected a row
+        if result.rows_affected() == 0 {
+            tracing::warn!(id = %id, "update_compliance_status: no rows affected (record may not exist)");
+            return Err(AppError::Database(DatabaseError::NotFound(id.to_string())));
+        }
+
+        tracing::debug!(id = %id, status = %status.as_str(), "Compliance status updated");
         Ok(())
     }
 
     /// Get pending blockchain requests and atomically claim them for processing.
     /// Uses UPDATE...RETURNING with FOR UPDATE SKIP LOCKED to prevent race conditions.
     /// Returned rows are already in 'processing' status.
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(limit = %limit))]
     async fn get_pending_blockchain_requests(
         &self,
         limit: i64,
     ) -> Result<Vec<TransferRequest>, AppError> {
         let now = Utc::now();
+        tracing::debug!(
+            now = %now,
+            limit = limit,
+            "Querying for pending blockchain requests (status=pending_submission, compliance=approved)"
+        );
         // Atomic claim: SELECT eligible rows with FOR UPDATE SKIP LOCKED,
         // UPDATE them to 'processing', and RETURN them in one operation.
         // This prevents race conditions when multiple worker replicas are running.

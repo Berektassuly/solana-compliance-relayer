@@ -200,12 +200,14 @@ impl AppService {
         // =====================================================================
         // STEP 4: Approve and Queue for Background Processing
         // =====================================================================
+        info!(id = %request_id, "Updating compliance_status to 'approved'");
         self.db_client
             .update_compliance_status(&request_id, ComplianceStatus::Approved)
             .await?;
         transfer_request.compliance_status = ComplianceStatus::Approved;
 
         // Queue for background worker (Outbox Pattern: no blockchain call here!)
+        info!(id = %request_id, "Updating blockchain_status to 'pending_submission'");
         self.db_client
             .update_blockchain_status(
                 &request_id,
@@ -218,7 +220,12 @@ impl AppService {
             .await?;
         transfer_request.blockchain_status = BlockchainStatus::PendingSubmission;
 
-        info!(id = %transfer_request.id, "Transfer approved and queued for background processing");
+        info!(
+            id = %transfer_request.id,
+            compliance_status = %transfer_request.compliance_status.as_str(),
+            blockchain_status = %transfer_request.blockchain_status.as_str(),
+            "Transfer approved and queued for background processing (worker should pick up within 10s)"
+        );
 
         Ok(transfer_request)
     }
