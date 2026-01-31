@@ -18,6 +18,12 @@
 
 ---
 
+## Live Demo
+
+[Watch the demo on YouTube](https://youtu.be/LSMlIqtrxL0) — dashboard, risk scanning, Jito MEV transaction, and Range Protocol compliance blocking.
+
+---
+
 ## Why This Exists
 
 Privacy-preserving protocols on Solana face a fundamental paradox: **users demand confidentiality**, but **institutions require auditability**. The Solana Compliance Relayer resolves this tension through a **Defense-in-Depth** architecture that ensures compliant, secure, and MEV-protected transactions.
