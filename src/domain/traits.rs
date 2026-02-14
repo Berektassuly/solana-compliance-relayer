@@ -335,7 +335,9 @@ pub trait BlockchainClient: Send + Sync {
             AppError::Blockchain(
                 crate::domain::BlockchainError::Connection(_)
                 | crate::domain::BlockchainError::Timeout(_)
-                | crate::domain::BlockchainError::RpcError(_),
+                | crate::domain::BlockchainError::RpcError(_)
+                | crate::domain::BlockchainError::TimeoutWithBlockhash { .. }
+                | crate::domain::BlockchainError::NetworkErrorWithBlockhash { .. },
             ) => LastErrorType::NetworkError,
             AppError::Validation(_) => LastErrorType::ValidationError,
             _ => LastErrorType::TransactionFailed,

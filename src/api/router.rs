@@ -1,9 +1,11 @@
 //! HTTP routing configuration with rate limiting and OpenAPI documentation.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method};
 use axum::{
     Json, Router,
@@ -14,11 +16,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
-use governor::{
-    Quota, RateLimiter,
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-};
+use governor::{Quota, RateLimiter, clock::DefaultClock, state::keyed::DashMapStateStore};
 use tower::ServiceBuilder;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -84,10 +82,10 @@ impl RateLimitConfig {
     }
 }
 
-/// Shared rate limiter state
+/// Shared rate limiter state (keyed by client IP to prevent single-user DoS)
 pub struct RateLimitState {
-    transfers_limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
-    health_limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    transfers_limiter: RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>,
+    health_limiter: RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>,
     config: RateLimitConfig,
 }
 
@@ -111,20 +109,22 @@ impl RateLimitState {
         );
 
         Self {
-            transfers_limiter: RateLimiter::direct(transfers_quota),
-            health_limiter: RateLimiter::direct(health_quota),
+            transfers_limiter: RateLimiter::keyed(transfers_quota),
+            health_limiter: RateLimiter::keyed(health_quota),
             config,
         }
     }
 }
 
-/// Rate limit middleware for transfers endpoints
+/// Rate limit middleware for transfers endpoints (keyed by client IP)
 async fn rate_limit_transfers_middleware(
     State(rate_limit): State<Arc<RateLimitState>>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    match rate_limit.transfers_limiter.check() {
+    let client_ip = extract_client_ip(&request);
+
+    match rate_limit.transfers_limiter.check_key(&client_ip) {
         Ok(_) => {
             let mut response = next.run(request).await;
             // Add rate limit headers
@@ -162,13 +162,15 @@ async fn rate_limit_transfers_middleware(
     }
 }
 
-/// Rate limit middleware for health endpoints
+/// Rate limit middleware for health endpoints (keyed by client IP)
 async fn rate_limit_health_middleware(
     State(rate_limit): State<Arc<RateLimitState>>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    match rate_limit.health_limiter.check() {
+    let client_ip = extract_client_ip(&request);
+
+    match rate_limit.health_limiter.check_key(&client_ip) {
         Ok(_) => next.run(request).await,
         Err(not_until) => {
             let wait_time = not_until.wait_time_from(governor::clock::Clock::now(
@@ -190,6 +192,31 @@ async fn rate_limit_health_middleware(
             response
         }
     }
+}
+
+/// Extract the client IP address from the request.
+/// Priority: X-Forwarded-For header > ConnectInfo > fallback to 127.0.0.1
+fn extract_client_ip(request: &Request<Body>) -> IpAddr {
+    // 1. Check X-Forwarded-For header (for reverse proxy setups)
+    if let Some(forwarded_for) = request.headers().get("X-Forwarded-For") {
+        if let Ok(value) = forwarded_for.to_str() {
+            // X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
+            // The first one is the original client IP
+            if let Some(first_ip) = value.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+
+    // 2. Check ConnectInfo from axum (direct connection IP)
+    if let Some(connect_info) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return connect_info.0.ip();
+    }
+
+    // 3. Fallback (e.g. in tests without ConnectInfo)
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
 /// Create CORS layer for cross-origin requests

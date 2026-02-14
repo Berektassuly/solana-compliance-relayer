@@ -463,7 +463,8 @@ impl DatabaseClient for PostgresClient {
                 updated_at = NOW()
             WHERE id IN (
                 SELECT id FROM transfer_requests
-                WHERE blockchain_status = 'pending_submission'
+                WHERE (blockchain_status = 'pending_submission'
+                       OR (blockchain_status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes'))
                   AND compliance_status = 'approved'
                   AND (blockchain_next_retry_at IS NULL OR blockchain_next_retry_at <= $1)
                   AND blockchain_retry_count < 10

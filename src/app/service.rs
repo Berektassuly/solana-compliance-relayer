@@ -476,6 +476,10 @@ impl AppService {
             Err(e) => {
                 let error_type = self.blockchain_client.classify_error(&e);
                 warn!(id = %transfer_request.id, error = ?e, error_type = %error_type, "Retry submission failed");
+
+                // SECURITY: Extract blockhash from error (sticky blockhash to prevent double-spend)
+                let attempt_blockhash = extract_blockhash_from_error(&e);
+
                 let retry_count = self.db_client.increment_retry_count(id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)
@@ -494,14 +498,19 @@ impl AppService {
                         None,
                         Some(&e.to_string()),
                         next_retry,
-                        None,
+                        attempt_blockhash.as_deref(),
                     )
                     .await?;
 
                 // Store Jito tracking info
                 let original_sig = transfer_request.blockchain_signature.as_deref();
                 self.db_client
-                    .update_jito_tracking(id, original_sig, error_type, None)
+                    .update_jito_tracking(
+                        id,
+                        original_sig,
+                        error_type,
+                        attempt_blockhash.as_deref(),
+                    )
                     .await?;
 
                 Err(e)
@@ -729,6 +738,9 @@ impl AppService {
                     "Transfer failed"
                 );
 
+                // SECURITY: Extract blockhash from error (sticky blockhash to prevent double-spend)
+                let attempt_blockhash = extract_blockhash_from_error(&e);
+
                 let retry_count = self.db_client.increment_retry_count(&request.id).await?;
                 let (status, next_retry) = if retry_count >= MAX_RETRY_ATTEMPTS {
                     (BlockchainStatus::Failed, None)
@@ -747,24 +759,31 @@ impl AppService {
                         None,
                         Some(&e.to_string()),
                         next_retry,
-                        None,
+                        attempt_blockhash.as_deref(),
                     )
                     .await?;
 
                 // Store Jito tracking info for JitoStateUnknown errors
                 // This enables status check on next retry attempt
                 if error_type == LastErrorType::JitoStateUnknown {
-                    // Extract signature and blockhash from error context if available
-                    // For now, we store the error type - signature is obtained from
-                    // blockchain_signature if previously set
                     let original_sig = request.blockchain_signature.as_deref();
                     self.db_client
-                        .update_jito_tracking(&request.id, original_sig, error_type, None)
+                        .update_jito_tracking(
+                            &request.id,
+                            original_sig,
+                            error_type,
+                            attempt_blockhash.as_deref(),
+                        )
                         .await?;
                 } else {
                     // Update error type for non-Jito errors
                     self.db_client
-                        .update_jito_tracking(&request.id, None, error_type, None)
+                        .update_jito_tracking(
+                            &request.id,
+                            None,
+                            error_type,
+                            attempt_blockhash.as_deref(),
+                        )
                         .await?;
                 }
             }
@@ -1078,6 +1097,23 @@ impl AppService {
 fn calculate_backoff(retry_count: i32) -> i64 {
     let backoff = 2_i64.pow(retry_count.min(8) as u32);
     backoff.min(MAX_BACKOFF_SECS)
+}
+
+/// Extract the attempt blockhash from a blockchain error, if present.
+/// Used for "sticky blockhash" logic: persist the blockhash used in a failed
+/// submission so retries reuse it instead of fetching a new one (prevents double-spend).
+fn extract_blockhash_from_error(error: &AppError) -> Option<String> {
+    match error {
+        AppError::Blockchain(crate::domain::BlockchainError::TimeoutWithBlockhash {
+            blockhash,
+            ..
+        })
+        | AppError::Blockchain(crate::domain::BlockchainError::NetworkErrorWithBlockhash {
+            blockhash,
+            ..
+        }) => Some(blockhash.clone()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

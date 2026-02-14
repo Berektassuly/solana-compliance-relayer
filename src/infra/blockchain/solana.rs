@@ -628,7 +628,10 @@ impl RpcBlockchainClient {
 
             // Submit via strategy (Jito bundle, standard sendTransaction, etc.)
             // The strategy handles signature extraction internally
-            let signature = strategy.submit_transaction(&serialized_tx, true).await?;
+            let signature = strategy
+                .submit_transaction(&serialized_tx, true)
+                .await
+                .map_err(|e| wrap_error_with_blockhash(e, &blockhash_str))?;
 
             info!(
                 signature = %signature,
@@ -642,7 +645,10 @@ impl RpcBlockchainClient {
             let signature = sdk_client
                 .send_and_confirm_transaction(transaction)
                 .await
-                .map_err(map_solana_client_error)?;
+                .map_err(|e| {
+                    let mapped = map_solana_client_error(e);
+                    wrap_error_with_blockhash(mapped, &blockhash_str)
+                })?;
 
             debug!(
                 signature = %signature,
@@ -2001,6 +2007,30 @@ fn map_solana_client_error(err: solana_client::client_error::ClientError) -> App
             }
         }
         _ => AppError::Blockchain(BlockchainError::TransactionFailed(msg)),
+    }
+}
+
+/// Wrap a blockchain error with the blockhash that was used for the transaction.
+/// This enables "sticky blockhash" logic: on retry, the service layer can reuse the
+/// same blockhash (which will fail safely if already processed) instead of fetching
+/// a new one (which could lead to double-spend).
+fn wrap_error_with_blockhash(error: AppError, blockhash: &str) -> AppError {
+    match error {
+        AppError::Blockchain(BlockchainError::Timeout(msg)) => {
+            AppError::Blockchain(BlockchainError::TimeoutWithBlockhash {
+                message: msg,
+                blockhash: blockhash.to_string(),
+            })
+        }
+        AppError::Blockchain(
+            BlockchainError::Connection(ref msg) | BlockchainError::RpcError(ref msg),
+        ) => AppError::Blockchain(BlockchainError::NetworkErrorWithBlockhash {
+            message: msg.clone(),
+            blockhash: blockhash.to_string(),
+        }),
+        // JitoStateUnknown, JitoBundleFailed, etc. pass through — they have
+        // their own retry semantics and the blockhash is already tracked separately.
+        other => other,
     }
 }
 

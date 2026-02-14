@@ -57,6 +57,14 @@ pub enum BlockchainError {
     JitoStateUnknown(String),
     #[error("Private submission unavailable, falling back: {0}")]
     PrivateSubmissionFallback(String),
+    /// Submission failed due to timeout, but the blockhash used is preserved
+    /// so retries can reuse the same blockhash (sticky blockhash) to prevent double-spend.
+    #[error("Submission timed out with blockhash {blockhash}: {message}")]
+    TimeoutWithBlockhash { message: String, blockhash: String },
+    /// Submission failed due to network error, but the blockhash used is preserved
+    /// so retries can reuse the same blockhash (sticky blockhash) to prevent double-spend.
+    #[error("Network error with blockhash {blockhash}: {message}")]
+    NetworkErrorWithBlockhash { message: String, blockhash: String },
 }
 
 #[derive(Error, Debug)]
