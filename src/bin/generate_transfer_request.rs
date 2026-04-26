@@ -4,9 +4,11 @@
 //!   cargo run --bin generate_transfer_request              # Public transfer
 //!   cargo run --bin generate_transfer_request -- --confidential  # Confidential transfer with ZK proofs
 
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
+use rand::TryRng;
 use solana_compliance_relayer::domain::types::{SubmitTransferRequest, TransferType};
 use solana_sdk::pubkey::Pubkey;
 
@@ -17,35 +19,31 @@ use solana_zk_sdk::encryption::{
 };
 use spl_token_confidential_transfer_proof_generation::transfer::transfer_split_proof_data;
 
-fn main() {
+const DEMO_SIGNER_PRIVATE_KEY_ENV: &str = "DEMO_SIGNER_PRIVATE_KEY_B58";
+
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let is_confidential = args.iter().any(|arg| arg == "--confidential");
 
-    // 1. Generate a random Ed25519 keypair for transaction signing
-    // let mut csprng = OsRng;
-    // let signing_key = SigningKey::generate(&mut csprng);
-    const MY_PRIVATE_KEY_B58: &str =
-        "3UNZciMppCp3btFvxwAWfhN1dp99YUYrxDS7F9Gf4mYumUkeYENZMXdmfJRe2zofqvLkvabb9YkbiusuS7uKJbxu";
-    // let signing_key = SigningKey::from_bytes(&[0; 32]).unwrap();
-    let key_bytes = bs58::decode(MY_PRIVATE_KEY_B58).into_vec().unwrap();
-    let signing_key =
-        SigningKey::from_bytes(key_bytes[..32].try_into().expect("key must be 32 bytes"));
+    // 1. Generate an ephemeral Ed25519 signer for this run. For reproducible
+    // local demos only, DEMO_SIGNER_PRIVATE_KEY_B58 may contain a throwaway
+    // 32-byte seed or 64-byte Solana keypair. Never use production key material.
+    let (signing_key, signer_source) = load_demo_signing_key()?;
     let verify_key = signing_key.verifying_key();
     // Convert to Solana Pubkeys for consistent display
     let from_pubkey = Pubkey::from(verify_key.to_bytes());
     // Use a random destination address
     let to_pubkey = Pubkey::new_unique();
 
-    println!("Generated Keypair:");
+    println!("Demo Signer:");
     println!("   Public Key (from_address): {}", from_pubkey);
-    // Note: In a real app never print private keys. This is a dev tool.
-    println!("   Private Key (keep safe):   {:?}", signing_key.to_bytes());
+    println!("   Source: {}", signer_source);
     println!("\n--------------------------------------------------\n");
 
     // 2. Prepare request data based on transfer type
     let (transfer_details, token_mint, amount_part): (TransferType, Option<String>, String) =
         if is_confidential {
-            generate_confidential_transfer()
+            generate_confidential_transfer()?
         } else {
             let amount = 1_000_000_000u64; // 1 SOL
             (TransferType::Public { amount }, None, amount.to_string())
@@ -80,7 +78,8 @@ fn main() {
     };
 
     // 5. Generate the CURL command (with optional Idempotency-Key header)
-    let json_body = serde_json::to_string_pretty(&request).unwrap();
+    let json_body = serde_json::to_string_pretty(&request)
+        .context("failed to serialize transfer request JSON")?;
     let curl_cmd = format!(
         "curl -X POST 'http://localhost:3000/transfer-requests' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Idempotency-Key: {}' \\\n  -d '{}'",
         nonce, json_body
@@ -88,13 +87,77 @@ fn main() {
 
     println!("\nGenerated curl command:\n");
     println!("{}", curl_cmd);
+
+    Ok(())
+}
+
+fn load_demo_signing_key() -> Result<(SigningKey, &'static str)> {
+    match std::env::var(DEMO_SIGNER_PRIVATE_KEY_ENV) {
+        Ok(encoded) => parse_demo_signing_key(&encoded).map(|signing_key| {
+            (
+                signing_key,
+                "DEMO_SIGNER_PRIVATE_KEY_B58 (value not printed)",
+            )
+        }),
+        Err(std::env::VarError::NotPresent) => {
+            let mut seed = [0_u8; 32];
+            let mut rng = rand::rngs::SysRng;
+            rng.try_fill_bytes(&mut seed)
+                .context("failed to read OS randomness for demo signer")?;
+            Ok((
+                SigningKey::from_bytes(&seed),
+                "ephemeral Ed25519 key for this run",
+            ))
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{DEMO_SIGNER_PRIVATE_KEY_ENV} must contain valid Unicode base58 text")
+        }
+    }
+}
+
+fn parse_demo_signing_key(encoded: &str) -> Result<SigningKey> {
+    if encoded.is_empty() {
+        bail!("{DEMO_SIGNER_PRIVATE_KEY_ENV} is set but empty");
+    }
+
+    if encoded != encoded.trim() {
+        bail!("{DEMO_SIGNER_PRIVATE_KEY_ENV} must not contain leading or trailing whitespace");
+    }
+
+    let key_bytes = bs58::decode(encoded).into_vec().with_context(|| {
+        format!("{DEMO_SIGNER_PRIVATE_KEY_ENV} must be valid base58-encoded key material")
+    })?;
+
+    let key_length = key_bytes.len();
+    if key_length != 32 && key_length != 64 {
+        bail!(
+            "{DEMO_SIGNER_PRIVATE_KEY_ENV} must decode to 32 bytes or 64 bytes, got {key_length}"
+        );
+    }
+
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&key_bytes[..32]);
+    let signing_key = SigningKey::from_bytes(&seed);
+
+    if key_length == 64 {
+        let mut public_key = [0_u8; 32];
+        public_key.copy_from_slice(&key_bytes[32..]);
+
+        if signing_key.verifying_key().to_bytes() != public_key {
+            bail!(
+                "{DEMO_SIGNER_PRIVATE_KEY_ENV} contains a 64-byte Solana keypair whose public key half does not match the private seed"
+            );
+        }
+    }
+
+    Ok(signing_key)
 }
 
 /// Generate a confidential transfer with real ZK proofs.
 ///
 /// This simulates a source account with a known balance, generates all required
 /// ElGamal/AES cryptographic keys, and produces valid ZK proofs for the transfer.
-fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
+fn generate_confidential_transfer() -> Result<(TransferType, Option<String>, String)> {
     println!("Generating CONFIDENTIAL transfer with real ZK proofs...\n");
 
     // Simulated account state
@@ -142,7 +205,7 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
         destination_elgamal_keypair.pubkey(),
         None, // No auditor
     )
-    .expect("Failed to generate ZK proofs");
+    .map_err(|err| anyhow::anyhow!("failed to generate ZK proofs: {err:?}"))?;
 
     println!("ZK proofs generated successfully!");
 
@@ -192,9 +255,9 @@ fn generate_confidential_transfer() -> (TransferType, Option<String>, String) {
         range_proof: range_proof_base64,
     };
 
-    (
+    Ok((
         transfer_details,
         Some(token_mint),
         "confidential".to_string(),
-    )
+    ))
 }

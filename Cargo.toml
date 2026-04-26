@@ -2,7 +2,7 @@
 name = "solana-compliance-relayer"
 version = "0.1.0"
 edition = "2024"
-description = "A production-ready Rust template demonstrating testable architecture"
+description = "Compliance-first Solana payment relayer for stablecoin checkout, audit trails, and controlled settlement."
 license = "MIT"
 
 [features]

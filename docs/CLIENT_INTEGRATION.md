@@ -83,7 +83,7 @@ The project includes CLI utilities for generating valid transfer requests with p
 
 ### generate_transfer_request
 
-Generates a complete, signed transfer request and outputs a ready-to-use curl command. Uses a dev keypair (or override via code).
+Generates a complete, signed transfer request and outputs a ready-to-use curl command. By default, it creates an ephemeral Ed25519 signer for each run. For reproducible local demos only, set `DEMO_SIGNER_PRIVATE_KEY_B58` to a throwaway 32-byte seed or 64-byte Solana keypair. Do not use production wallet material.
 
 **Usage:**
 
@@ -97,12 +97,12 @@ cargo run --bin generate_transfer_request -- --confidential
 
 **Example Output (Public Transfer):**
 
-The tool prints the keypair, nonce, signing message (matching server format `{from}:{to}:{amount}:SOL:{nonce}`), then a ready-to-use curl command:
+The tool prints the demo signer's public key, nonce, signing message (matching server format `{from}:{to}:{amount}:SOL:{nonce}`), then a ready-to-use curl command. It does not print private key material.
 
 ```
-Generated Keypair:
+Demo Signer:
    Public Key (from_address): <Base58 pubkey>
-   Private Key (keep safe):   [32 bytes...]
+   Source: ephemeral Ed25519 key for this run
 
 --------------------------------------------------
 
