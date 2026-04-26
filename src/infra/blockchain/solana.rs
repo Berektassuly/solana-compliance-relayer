@@ -1,4 +1,4 @@
-//! Blockchain RPC client implementation for Solana.
+﻿//! Blockchain RPC client implementation for Solana.
 //!
 //! This module provides both mock and real blockchain interactions.
 //! Real blockchain functionality is enabled with the `real-blockchain` feature.
@@ -663,12 +663,13 @@ impl RpcBlockchainClient {
     ///
     /// Used for submitting transactions via the submission strategy.
     fn serialize_transaction_base58(&self, transaction: &Transaction) -> Result<String, AppError> {
-        let serialized = bincode::serialize(transaction).map_err(|e| {
-            AppError::Blockchain(BlockchainError::TransactionFailed(format!(
-                "Failed to serialize transaction: {}",
-                e
-            )))
-        })?;
+        let serialized = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+            .map_err(|e| {
+                AppError::Blockchain(BlockchainError::TransactionFailed(format!(
+                    "Failed to serialize transaction: {}",
+                    e
+                )))
+            })?;
 
         Ok(bs58::encode(&serialized).into_string())
     }
@@ -2067,11 +2068,21 @@ pub fn signing_key_from_base58(secret: &SecretString) -> Result<SigningKey, AppE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static NEXT_TEST_KEY_SEED: AtomicU8 = AtomicU8::new(1);
+
+    fn test_signing_key() -> SigningKey {
+        let seed = NEXT_TEST_KEY_SEED.fetch_add(1, Ordering::Relaxed);
+        let mut bytes = [0_u8; 32];
+        bytes[0] = seed;
+        bytes[31] = seed.wrapping_mul(31);
+        SigningKey::from_bytes(&bytes)
+    }
 
     #[test]
     fn test_client_creation() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key);
         assert!(client.is_ok());
@@ -2079,7 +2090,7 @@ mod tests {
 
     #[test]
     fn test_public_key_generation() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                 .unwrap();
@@ -2094,7 +2105,7 @@ mod tests {
 
     #[test]
     fn test_signing() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                 .unwrap();
@@ -2104,7 +2115,7 @@ mod tests {
 
     #[test]
     fn test_signing_key_from_base58_valid_32_bytes() {
-        let original_key = SigningKey::generate(&mut OsRng);
+        let original_key = test_signing_key();
         let encoded = bs58::encode(original_key.to_bytes()).into_string();
         let secret = SecretString::from(encoded);
         let result = signing_key_from_base58(&secret);
@@ -2113,7 +2124,7 @@ mod tests {
 
     #[test]
     fn test_signing_key_from_base58_valid_64_bytes() {
-        let original_key = SigningKey::generate(&mut OsRng);
+        let original_key = test_signing_key();
         let mut keypair = original_key.to_bytes().to_vec();
         keypair.extend_from_slice(original_key.verifying_key().as_bytes());
         let encoded = bs58::encode(&keypair).into_string();
@@ -2168,7 +2179,7 @@ mod tests {
 
     #[test]
     fn test_signing_determinism() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                 .unwrap();
@@ -2214,7 +2225,7 @@ mod tests {
                     failure_error: None,
                     next_response: None,
                 }),
-                signing_key: SigningKey::generate(&mut OsRng),
+                signing_key: test_signing_key(),
             }
         }
 
@@ -2333,7 +2344,7 @@ mod tests {
     impl ConfigurableMockProvider {
         fn new() -> Self {
             Self {
-                signing_key: SigningKey::generate(&mut OsRng),
+                signing_key: test_signing_key(),
                 responses: Mutex::new(Vec::new()),
                 call_count: Mutex::new(0),
             }
@@ -2802,7 +2813,7 @@ mod tests {
 
     #[test]
     fn test_http_solana_rpc_provider_creation() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let result = HttpSolanaRpcProvider::new(
             "https://api.devnet.solana.com",
             signing_key,
@@ -2813,7 +2824,7 @@ mod tests {
 
     #[test]
     fn test_http_solana_rpc_provider_public_key() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let provider = HttpSolanaRpcProvider::new(
             "https://api.devnet.solana.com",
             signing_key.clone(),
@@ -2830,7 +2841,7 @@ mod tests {
 
     #[test]
     fn test_http_solana_rpc_provider_sign() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let provider = HttpSolanaRpcProvider::new(
             "https://api.devnet.solana.com",
             signing_key,
@@ -2976,7 +2987,7 @@ mod tests {
         async fn test_submit_transaction_real_blockchain_path() {
             // This test verifies the SDK client is properly initialized
             // Actual transfer tests require network/mocking
-            let signing_key = SigningKey::generate(&mut OsRng);
+            let signing_key = test_signing_key();
             let client =
                 RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                     .unwrap();
@@ -2992,7 +3003,7 @@ mod tests {
 
     #[test]
     fn test_rpc_blockchain_client_new() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let config = RpcClientConfig {
             timeout: Duration::from_secs(15),
             max_retries: 2,
@@ -3060,7 +3071,7 @@ mod tests {
 
     #[test]
     fn test_client_without_submission_strategy() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                 .unwrap();
@@ -3076,7 +3087,7 @@ mod tests {
             QuickNodePrivateSubmissionStrategy, QuickNodeSubmissionConfig,
         };
 
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: true,
@@ -3105,7 +3116,7 @@ mod tests {
             QuickNodePrivateSubmissionStrategy, QuickNodeSubmissionConfig,
         };
 
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let config = QuickNodeSubmissionConfig {
             rpc_url: "https://test.quiknode.pro/xxx".to_string(),
             enable_jito_bundles: false, // Jito disabled
@@ -3144,7 +3155,7 @@ mod tests {
     fn test_serialize_transaction_base58() {
         use solana_sdk::{hash::Hash, transaction::Transaction};
 
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key();
         let client =
             RpcBlockchainClient::with_defaults("https://api.devnet.solana.com", signing_key)
                 .unwrap();

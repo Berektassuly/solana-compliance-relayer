@@ -198,15 +198,15 @@ async fn rate_limit_health_middleware(
 /// Priority: X-Forwarded-For header > ConnectInfo > fallback to 127.0.0.1
 fn extract_client_ip(request: &Request<Body>) -> IpAddr {
     // 1. Check X-Forwarded-For header (for reverse proxy setups)
-    if let Some(forwarded_for) = request.headers().get("X-Forwarded-For") {
-        if let Ok(value) = forwarded_for.to_str() {
-            // X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
-            // The first one is the original client IP
-            if let Some(first_ip) = value.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                    return ip;
-                }
-            }
+    if let Some(forwarded_for) = request.headers().get("X-Forwarded-For")
+        && let Ok(value) = forwarded_for.to_str()
+    {
+        // X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
+        // The first one is the original client IP
+        if let Some(first_ip) = value.split(',').next()
+            && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
+        {
+            return ip;
         }
     }
 

@@ -152,7 +152,7 @@ impl DatabaseClient for MockDatabaseClient {
         self.check_should_fail()?;
         let storage = self.storage.lock().unwrap();
         let mut items: Vec<TransferRequest> = storage.values().cloned().collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
 
         // Apply cursor
         let items = if let Some(cursor_id) = cursor {
@@ -256,7 +256,7 @@ impl DatabaseClient for MockDatabaseClient {
             }
         }
 
-        claimed_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        claimed_items.sort_by_key(|item| item.created_at);
         Ok(claimed_items)
     }
 

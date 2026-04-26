@@ -15,7 +15,6 @@
 //! and the transaction proceeds immediately (prioritizing liveness over privacy).
 
 use chrono::{DateTime, Utc};
-use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -281,8 +280,6 @@ impl PrivacyHealthCheckService {
 
     /// Calculate a randomized delay based on activity level
     fn calculate_delay(&self, recent_tx_count: u64) -> u64 {
-        let mut rng = rand::thread_rng();
-
         // Lower activity = longer delay (inverse relationship)
         let activity_factor = if self.config.min_tx_threshold > 0 {
             1.0 - (recent_tx_count as f64 / self.config.min_tx_threshold as f64)
@@ -294,7 +291,7 @@ impl PrivacyHealthCheckService {
             + (activity_factor * (self.config.max_delay_secs - self.config.min_delay_secs) as f64);
 
         // Add randomization (±30%)
-        let jitter = rng.gen_range(0.7..1.3);
+        let jitter = rand::random_range(0.7..1.3);
         let delay = (base_delay * jitter) as u64;
 
         delay.clamp(self.config.min_delay_secs, self.config.max_delay_secs)

@@ -51,7 +51,6 @@ pub const JITO_TIP_ACCOUNTS: [&str; 8] = [
 /// Jito recommends distributing tips across their 8 tip accounts to avoid
 /// contention on any single account during high-traffic periods.
 pub fn random_jito_tip_account() -> &'static str {
-    use rand::Rng;
-    let idx = rand::thread_rng().gen_range(0..JITO_TIP_ACCOUNTS.len());
+    let idx = rand::random_range(0..JITO_TIP_ACCOUNTS.len());
     JITO_TIP_ACCOUNTS[idx]
 }

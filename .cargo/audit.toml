@@ -1,2 +1,10 @@
 [advisories]
-ignore = ["RUSTSEC-2023-0071"]
+ignore = [
+    "RUSTSEC-2023-0071",
+    # Pulled by Solana CLI/client crates through clap 2.x.
+    "RUSTSEC-2021-0139",
+    "RUSTSEC-2024-0375",
+    "RUSTSEC-2021-0145",
+    # Solana/SPL still use bincode for transaction and instruction wire formats.
+    "RUSTSEC-2025-0141",
+]
