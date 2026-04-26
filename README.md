@@ -2,7 +2,7 @@
 
 # Solana Compliance Relayer
 
-### Bridging the gap between on-chain privacy, regulatory compliance, and high-throughput execution.
+### Compliance-first Solana payment infrastructure for stablecoin checkout, remittance, and virtual-card funding.
 
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -18,6 +18,57 @@
 
 ---
 
+## Product Focus
+
+The relayer lets fintech applications accept or send Solana stablecoin payments while enforcing compliance before settlement. Clean transfers are submitted privately and reliably. Risky transfers are rejected before chain submission but retained for audit.
+
+Built for S1lkPay / Frontier-style payment products, it exposes a backend API for merchant checkout sessions, remittance flows, virtual card funding, internal blocklist operations, Range Protocol AML screening, Helius/QuickNode confirmation webhooks, and audit reports merchants can store for compliance review.
+
+---
+
+## S1lkPay / Frontier Demo Flow
+
+1. A merchant, wallet, or card program creates a checkout session for a USDC payment using `POST /checkout/sessions`.
+2. The customer signs a Solana transfer payload in their wallet. The signed payload includes amount, mint, recipient, and nonce.
+3. The app submits the signed transfer to `POST /checkout/sessions/{id}/submit-transfer`.
+4. The relayer verifies the signature, enforces nonce replay protection, checks the internal blocklist, screens the recipient with Range Protocol, and persists the decision.
+5. Approved transfers are queued for private/reliable Solana submission. Rejected transfers never settle on-chain.
+6. The merchant fetches `GET /transfer-requests/{id}/audit-report` to see the final compliance and settlement decision.
+
+### Merchant Checkout Example
+
+```bash
+curl -X POST http://localhost:3000/checkout/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "merchant_id": "merchant_kz_001",
+    "merchant_reference": "INV-2026-00042",
+    "destination_wallet": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+    "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amount": 25000000,
+    "customer_wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "merchant_metadata": {
+      "purpose": "virtual_card_funding",
+      "currency": "USDC"
+    }
+  }'
+```
+
+### Audit Report Example
+
+```json
+{
+  "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+  "asset_type": "spl_token",
+  "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "amount": { "visibility": "public", "amount": 25000000 },
+  "compliance_status": "approved",
+  "blockchain_status": "pending_submission",
+  "risk_decision_summary": "Approved by compliance controls and queued or submitted for settlement.",
+  "final_decision": "approved_for_settlement"
+}
+```
+
 ## Live Demo
 
 [Watch the demo on YouTube](https://youtu.be/LSMlIqtrxL0) — dashboard, risk scanning, Jito MEV transaction, and Range Protocol compliance blocking.
@@ -26,7 +77,7 @@
 
 ## Why This Exists
 
-Privacy-preserving protocols on Solana face a fundamental paradox: **users demand confidentiality**, but **institutions require auditability**. The Solana Compliance Relayer resolves this tension through a **Defense-in-Depth** architecture that ensures compliant, secure, and MEV-protected transactions.
+Stablecoin payment providers need instant settlement, low fees, and programmable controls, but fintech operators also need compliance evidence before they move money. The Solana Compliance Relayer resolves this with a defense-in-depth payment pipeline for merchant checkout, cross-border remittance, and card-funding flows.
 
 | Challenge | Solution |
 |-----------|----------|
@@ -45,6 +96,9 @@ Privacy-preserving protocols on Solana face a fundamental paradox: **users deman
 |---------|-------------|
 | **MEV Protection (Ghost Mode)** | Private transaction submission via Jito block builders—no frontrunning, no sandwich attacks |
 | **Real-Time Compliance** | Automated AML/Sanctions screening via Range Protocol with configurable risk thresholds |
+| **Merchant Checkout Sessions** | Durable sessions for stablecoin checkout, remittance, and virtual-card funding flows |
+| **Compliance Audit Reports** | Machine-readable settlement and risk decision reports for merchants and operators |
+| **Authenticated Admin Controls** | `/admin/*` routes support `ADMIN_API_KEY` for production blocklist management |
 | **Client-Side WASM Signing** | Ed25519 via `ed25519-dalek` compiled to WebAssembly—private keys never leave the browser |
 | **Replay Attack Protection** | Cryptographic enforcement of request uniqueness via nonces |
 | **Double-Spend Protection** | Status-aware retry logic prevents duplicate submissions during network failures |
@@ -149,6 +203,7 @@ The backend runs on `http://localhost:3000`. Swagger UI is available at `/swagge
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | Hexagonal architecture, directory structure, and data flow diagrams |
+| [Submission Brief](SUBMISSION.md) | S1lkPay / Frontier problem, product, architecture, demo script, and roadmap |
 | [Security](docs/SECURITY.md) | MEV protection, double-spend prevention, replay protection, blocklist manager |
 | [API Reference](docs/API_REFERENCE.md) | Endpoints, signing message format, and example requests |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, RPC provider strategy, deployment |

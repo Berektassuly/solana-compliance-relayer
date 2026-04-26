@@ -50,6 +50,8 @@ struct Config {
     helius_webhook_secret: Option<String>,
     /// QuickNode webhook secret for authentication (optional)
     quicknode_webhook_secret: Option<String>,
+    /// Admin API key for /admin route authentication (optional for local development)
+    admin_api_key: Option<String>,
     /// Enable privacy health checks for confidential transfers
     enable_privacy_checks: bool,
     /// Enable Jito bundle submission for MEV-protected transactions (QuickNode only)
@@ -99,6 +101,8 @@ impl Config {
         let quicknode_webhook_secret = env::var("QUICKNODE_WEBHOOK_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
+
+        let admin_api_key = env::var("ADMIN_API_KEY").ok().filter(|s| !s.is_empty());
 
         // Range risk threshold configuration
         let range_risk_threshold = env::var("RANGE_RISK_THRESHOLD")
@@ -165,6 +169,7 @@ impl Config {
             range_risk_threshold,
             helius_webhook_secret,
             quicknode_webhook_secret,
+            admin_api_key,
             enable_privacy_checks,
             use_jito_bundles,
             jito_tip_lamports,
@@ -343,7 +348,8 @@ async fn main() -> Result<()> {
         Arc::new(compliance_provider),
         config.helius_webhook_secret.clone(),
         config.quicknode_webhook_secret.clone(),
-    );
+    )
+    .with_admin_api_key(config.admin_api_key.clone());
 
     if config.helius_webhook_secret.is_some() {
         info!("   ✓ Helius webhook secret configured");
@@ -355,6 +361,12 @@ async fn main() -> Result<()> {
         info!("   ✓ QuickNode webhook secret configured");
     } else {
         info!("   ○ QuickNode webhook secret not configured (webhook auth disabled)");
+    }
+
+    if config.admin_api_key.is_some() {
+        info!("   ✓ Admin API key configured");
+    } else {
+        warn!("   ⚠ ADMIN_API_KEY not configured (/admin auth disabled for local development)");
     }
 
     // Initialize privacy health check service (QuickNode only)

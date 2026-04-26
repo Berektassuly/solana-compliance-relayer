@@ -8,8 +8,9 @@ use tracing::{info, instrument};
 
 use crate::domain::types::TransferType;
 use crate::domain::{
-    AppError, BlockchainStatus, ComplianceStatus, DatabaseClient, DatabaseError, LastErrorType,
-    PaginatedResponse, SubmitTransferRequest, TransferRequest, WalletRiskProfile,
+    AppError, BlockchainStatus, CheckoutSession, CheckoutSessionStatus, ComplianceStatus,
+    CreateCheckoutSessionRequest, DatabaseClient, DatabaseError, LastErrorType, PaginatedResponse,
+    SubmitTransferRequest, TransferRequest, WalletRiskProfile,
 };
 
 /// PostgreSQL connection pool configuration
@@ -145,6 +146,28 @@ impl PostgresClient {
             // Request Uniqueness fields
             nonce,
             client_signature,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    /// Parse a database row into a CheckoutSession
+    fn row_to_checkout_session(row: &sqlx::postgres::PgRow) -> Result<CheckoutSession, AppError> {
+        let status_str: String = row.get("status");
+        let amount: i64 = row.get("amount");
+
+        Ok(CheckoutSession {
+            id: row.get("id"),
+            merchant_id: row.get("merchant_id"),
+            merchant_reference: row.get("merchant_reference"),
+            destination_wallet: row.get("destination_wallet"),
+            token_mint: row.get("token_mint"),
+            amount: amount as u64,
+            customer_wallet: row.get("customer_wallet"),
+            status: status_str.parse().unwrap_or(CheckoutSessionStatus::Open),
+            expires_at: row.get("expires_at"),
+            merchant_metadata: row.get("merchant_metadata"),
+            transfer_request_id: row.get("transfer_request_id"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -534,6 +557,107 @@ impl DatabaseClient for PostgresClient {
         match row {
             Some(row) => Ok(Some(Self::row_to_transfer_request(&row)?)),
             None => Ok(None),
+        }
+    }
+
+    // =========================================================================
+    // Merchant Checkout Session Methods
+    // =========================================================================
+
+    #[instrument(skip(self, data), fields(merchant_id = %data.merchant_id, merchant_reference = %data.merchant_reference))]
+    async fn create_checkout_session(
+        &self,
+        data: &CreateCheckoutSessionRequest,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CheckoutSession, AppError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO checkout_sessions (
+                id, merchant_id, merchant_reference, destination_wallet,
+                token_mint, amount, customer_wallet, status, expires_at,
+                merchant_metadata, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING id, merchant_id, merchant_reference, destination_wallet,
+                      token_mint, amount, customer_wallet, status, expires_at,
+                      merchant_metadata, transfer_request_id, created_at, updated_at
+            "#,
+        )
+        .bind(&id)
+        .bind(&data.merchant_id)
+        .bind(&data.merchant_reference)
+        .bind(&data.destination_wallet)
+        .bind(data.token_mint.as_deref())
+        .bind(data.amount as i64)
+        .bind(data.customer_wallet.as_deref())
+        .bind(CheckoutSessionStatus::Open.as_str())
+        .bind(expires_at)
+        .bind(data.merchant_metadata.as_ref())
+        .bind(now)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::from(e)))?;
+
+        Self::row_to_checkout_session(&row)
+    }
+
+    #[instrument(skip(self))]
+    async fn get_checkout_session(&self, id: &str) -> Result<Option<CheckoutSession>, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, merchant_id, merchant_reference, destination_wallet,
+                   token_mint, amount, customer_wallet, status, expires_at,
+                   merchant_metadata, transfer_request_id, created_at, updated_at
+            FROM checkout_sessions
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_checkout_session(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[instrument(skip(self), fields(session_id = %session_id, transfer_request_id = %transfer_request_id, status = %status.as_str()))]
+    async fn link_checkout_session_transfer(
+        &self,
+        session_id: &str,
+        transfer_request_id: &str,
+        status: CheckoutSessionStatus,
+    ) -> Result<CheckoutSession, AppError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE checkout_sessions
+            SET transfer_request_id = $1,
+                status = $2,
+                updated_at = NOW()
+            WHERE id = $3
+            RETURNING id, merchant_id, merchant_reference, destination_wallet,
+                      token_mint, amount, customer_wallet, status, expires_at,
+                      merchant_metadata, transfer_request_id, created_at, updated_at
+            "#,
+        )
+        .bind(transfer_request_id)
+        .bind(status.as_str())
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(DatabaseError::Query(e.to_string())))?;
+
+        match row {
+            Some(row) => Self::row_to_checkout_session(&row),
+            None => Err(AppError::Database(DatabaseError::NotFound(
+                session_id.to_string(),
+            ))),
         }
     }
 

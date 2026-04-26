@@ -4,7 +4,8 @@ use async_trait::async_trait;
 
 use super::error::AppError;
 use super::types::{
-    BlockchainStatus, ComplianceStatus, LastErrorType, PaginatedResponse, SubmitTransferRequest,
+    BlockchainStatus, CheckoutSession, CheckoutSessionStatus, ComplianceStatus,
+    CreateCheckoutSessionRequest, LastErrorType, PaginatedResponse, SubmitTransferRequest,
     TransactionStatus, TransferRequest, WalletRiskProfile,
 };
 use chrono::{DateTime, Utc};
@@ -74,6 +75,41 @@ pub trait DatabaseClient: Send + Sync {
         &self,
         signature: &str,
     ) -> Result<Option<TransferRequest>, AppError>;
+
+    // =========================================================================
+    // Merchant Checkout Session Methods
+    // =========================================================================
+
+    /// Create a durable merchant checkout session.
+    async fn create_checkout_session(
+        &self,
+        data: &CreateCheckoutSessionRequest,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CheckoutSession, AppError> {
+        let _ = (data, expires_at);
+        Err(AppError::NotSupported(
+            "create_checkout_session not implemented".to_string(),
+        ))
+    }
+
+    /// Get a checkout session by ID.
+    async fn get_checkout_session(&self, id: &str) -> Result<Option<CheckoutSession>, AppError> {
+        let _ = id;
+        Ok(None)
+    }
+
+    /// Link a checkout session to a transfer request and persist the checkout status.
+    async fn link_checkout_session_transfer(
+        &self,
+        session_id: &str,
+        transfer_request_id: &str,
+        status: CheckoutSessionStatus,
+    ) -> Result<CheckoutSession, AppError> {
+        let _ = (session_id, transfer_request_id, status);
+        Err(AppError::NotSupported(
+            "link_checkout_session_transfer not implemented".to_string(),
+        ))
+    }
 
     // =========================================================================
     // Request Uniqueness Methods (Replay Protection & Idempotency)

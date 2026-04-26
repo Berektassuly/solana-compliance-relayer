@@ -6,12 +6,26 @@
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
 use solana_compliance_relayer::domain::{
-    BlockchainStatus, DatabaseClient, SubmitTransferRequest, TransferType,
+    BlockchainStatus, CheckoutSessionStatus, CreateCheckoutSessionRequest, DatabaseClient,
+    SubmitTransferRequest, TransferType,
 };
 use solana_compliance_relayer::infra::{PostgresClient, PostgresConfig};
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 /// Helper to create a PostgreSQL container and client
-async fn setup_postgres() -> (PostgresClient, testcontainers::ContainerAsync<GenericImage>) {
+async fn setup_postgres() -> Option<(PostgresClient, testcontainers::ContainerAsync<GenericImage>)>
+{
+    if !docker_available() {
+        eprintln!("Skipping database integration test: Docker is not available");
+        return None;
+    }
+
     let container = GenericImage::new("postgres", "16-alpine")
         .with_env_var("POSTGRES_DB", "test_db")
         .with_env_var("POSTGRES_USER", "postgres")
@@ -46,12 +60,14 @@ async fn setup_postgres() -> (PostgresClient, testcontainers::ContainerAsync<Gen
         .await
         .expect("Failed to run migrations");
 
-    (client, container)
+    Some((client, container))
 }
 
 #[tokio::test]
 async fn test_create_and_get_transfer_request() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     let request = SubmitTransferRequest {
         from_address: "From1".to_string(),
@@ -92,7 +108,9 @@ async fn test_create_and_get_transfer_request() {
 
 #[tokio::test]
 async fn test_list_requests_pagination() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     // Create 5 items
     for i in 0..5 {
@@ -143,7 +161,9 @@ async fn test_list_requests_pagination() {
 
 #[tokio::test]
 async fn test_blockchain_status_updates() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
@@ -215,7 +235,9 @@ async fn test_blockchain_status_updates() {
 
 #[tokio::test]
 async fn test_get_pending_blockchain_requests() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     // Create items with different statuses
     for i in 0..3 {
@@ -285,7 +307,9 @@ async fn test_get_pending_blockchain_requests() {
 
 #[tokio::test]
 async fn test_increment_retry_count() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     let request = SubmitTransferRequest {
         from_address: "From".to_string(),
@@ -327,7 +351,9 @@ async fn test_increment_retry_count() {
 
 #[tokio::test]
 async fn test_health_check() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     let result = client.health_check().await;
     assert!(result.is_ok());
@@ -335,11 +361,76 @@ async fn test_health_check() {
 
 #[tokio::test]
 async fn test_get_nonexistent_request() {
-    let (client, _container) = setup_postgres().await;
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
 
     let result = client
         .get_transfer_request("nonexistent_id")
         .await
         .expect("Query should succeed");
     assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_checkout_session_create_get_and_link() {
+    let Some((client, _container)) = setup_postgres().await else {
+        return;
+    };
+
+    let checkout = CreateCheckoutSessionRequest {
+        merchant_id: "merchant_kz_001".to_string(),
+        merchant_reference: "INV-2026-00042".to_string(),
+        destination_wallet: "MerchantWallet".to_string(),
+        token_mint: Some("USDCMint".to_string()),
+        amount: 25_000_000,
+        customer_wallet: Some("CustomerWallet".to_string()),
+        expires_at: None,
+        merchant_metadata: Some(serde_json::json!({
+            "purpose": "virtual_card_funding"
+        })),
+    };
+
+    let session = client
+        .create_checkout_session(
+            &checkout,
+            chrono::Utc::now() + chrono::Duration::minutes(30),
+        )
+        .await
+        .expect("Failed to create checkout session");
+    assert_eq!(session.status, CheckoutSessionStatus::Open);
+    assert_eq!(session.amount, 25_000_000);
+
+    let transfer = client
+        .submit_transfer(&SubmitTransferRequest {
+            from_address: "CustomerWallet".to_string(),
+            to_address: "MerchantWallet".to_string(),
+            transfer_details: TransferType::Public { amount: 25_000_000 },
+            token_mint: Some("USDCMint".to_string()),
+            signature: "dummy_sig".to_string(),
+            nonce: "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6400".to_string(),
+        })
+        .await
+        .expect("Failed to create transfer");
+
+    let linked = client
+        .link_checkout_session_transfer(
+            &session.id,
+            &transfer.id,
+            CheckoutSessionStatus::TransferSubmitted,
+        )
+        .await
+        .expect("Failed to link checkout session");
+    assert_eq!(
+        linked.transfer_request_id.as_deref(),
+        Some(transfer.id.as_str())
+    );
+
+    let fetched = client
+        .get_checkout_session(&session.id)
+        .await
+        .expect("Failed to fetch checkout session")
+        .expect("Checkout session not found");
+    assert_eq!(fetched.id, session.id);
+    assert_eq!(fetched.status, CheckoutSessionStatus::TransferSubmitted);
 }

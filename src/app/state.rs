@@ -21,6 +21,8 @@ pub struct AppState {
     /// QuickNode webhook secret for authentication (optional)
     /// Used to validate incoming webhook payloads from QuickNode Streams
     pub quicknode_webhook_secret: Option<String>,
+    /// Admin API key for application-level authentication on /admin routes (optional for local dev)
+    pub admin_api_key: Option<String>,
     /// Privacy health check service for confidential transfers
     pub privacy_service: Option<Arc<PrivacyHealthCheckService>>,
     /// Internal blocklist manager for local address screening
@@ -84,10 +86,18 @@ impl AppState {
             compliance_provider,
             helius_webhook_secret,
             quicknode_webhook_secret,
+            admin_api_key: None,
             privacy_service: None,
             blocklist: None,
             risk_service: None,
         }
+    }
+
+    /// Add admin API key to the application state (builder pattern)
+    #[must_use]
+    pub fn with_admin_api_key(mut self, admin_api_key: Option<String>) -> Self {
+        self.admin_api_key = admin_api_key;
+        self
     }
 
     /// Add privacy service to the application state (builder pattern)

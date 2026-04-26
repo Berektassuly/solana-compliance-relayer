@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainError, BlockchainStatus, ComplianceStatus,
-    DatabaseClient, DatabaseError, PaginatedResponse, SubmitTransferRequest, TransferRequest,
+    AppError, BlockchainClient, BlockchainError, BlockchainStatus, CheckoutSession,
+    CheckoutSessionStatus, ComplianceStatus, CreateCheckoutSessionRequest, DatabaseClient,
+    DatabaseError, PaginatedResponse, SubmitTransferRequest, TransferRequest,
 };
 
 /// Configuration for mock behavior
@@ -37,6 +38,7 @@ impl MockConfig {
 /// Mock database client for testing
 pub struct MockDatabaseClient {
     storage: Arc<Mutex<HashMap<String, TransferRequest>>>,
+    checkout_storage: Arc<Mutex<HashMap<String, CheckoutSession>>>,
     config: MockConfig,
     is_healthy: AtomicBool,
 }
@@ -51,6 +53,7 @@ impl MockDatabaseClient {
     pub fn with_config(config: MockConfig) -> Self {
         Self {
             storage: Arc::new(Mutex::new(HashMap::new())),
+            checkout_storage: Arc::new(Mutex::new(HashMap::new())),
             config,
             is_healthy: AtomicBool::new(true),
         }
@@ -282,6 +285,61 @@ impl DatabaseClient for MockDatabaseClient {
             .values()
             .find(|req| req.blockchain_signature.as_deref() == Some(signature))
             .cloned())
+    }
+
+    async fn create_checkout_session(
+        &self,
+        data: &CreateCheckoutSessionRequest,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CheckoutSession, AppError> {
+        self.check_should_fail()?;
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let session = CheckoutSession {
+            id: id.clone(),
+            merchant_id: data.merchant_id.clone(),
+            merchant_reference: data.merchant_reference.clone(),
+            destination_wallet: data.destination_wallet.clone(),
+            token_mint: data.token_mint.clone(),
+            amount: data.amount,
+            customer_wallet: data.customer_wallet.clone(),
+            status: CheckoutSessionStatus::Open,
+            expires_at,
+            merchant_metadata: data.merchant_metadata.clone(),
+            transfer_request_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.checkout_storage
+            .lock()
+            .unwrap()
+            .insert(id, session.clone());
+        Ok(session)
+    }
+
+    async fn get_checkout_session(&self, id: &str) -> Result<Option<CheckoutSession>, AppError> {
+        self.check_should_fail()?;
+        Ok(self.checkout_storage.lock().unwrap().get(id).cloned())
+    }
+
+    async fn link_checkout_session_transfer(
+        &self,
+        session_id: &str,
+        transfer_request_id: &str,
+        status: CheckoutSessionStatus,
+    ) -> Result<CheckoutSession, AppError> {
+        self.check_should_fail()?;
+        let mut storage = self.checkout_storage.lock().unwrap();
+        let Some(session) = storage.get_mut(session_id) else {
+            return Err(AppError::Database(DatabaseError::NotFound(
+                session_id.to_string(),
+            )));
+        };
+
+        session.transfer_request_id = Some(transfer_request_id.to_string());
+        session.status = status;
+        session.updated_at = Utc::now();
+        Ok(session.clone())
     }
 }
 

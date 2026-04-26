@@ -31,6 +31,10 @@ use crate::app::AppState;
 use crate::domain::{ErrorDetail, ErrorResponse, RateLimitResponse};
 
 use super::admin::{add_blocklist_handler, list_blocklist_handler, remove_blocklist_handler};
+use super::audit::get_transfer_audit_report_handler;
+use super::checkout::{
+    create_checkout_session_handler, get_checkout_session_handler, submit_checkout_transfer_handler,
+};
 use super::handlers::{
     ApiDoc, get_transfer_request_handler, health_check_handler, helius_webhook_handler,
     list_transfer_requests_handler, liveness_handler, quicknode_webhook_handler, readiness_handler,
@@ -219,6 +223,48 @@ fn extract_client_ip(request: &Request<Body>) -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
+/// Admin authentication middleware.
+///
+/// Local development remains usable when ADMIN_API_KEY is not configured. When it is
+/// configured, /admin routes require either `Authorization: Bearer <key>` or
+/// `X-Admin-Api-Key: <key>`.
+async fn admin_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let Some(expected_key) = state.admin_api_key.as_deref() else {
+        return next.run(request).await;
+    };
+
+    if admin_credentials_valid(request.headers(), expected_key) {
+        return next.run(request).await;
+    }
+
+    let body = ErrorResponse {
+        error: ErrorDetail {
+            r#type: "authentication_error".to_string(),
+            message: "Missing or invalid admin credentials".to_string(),
+        },
+    };
+    (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+}
+
+fn admin_credentials_valid(headers: &axum::http::HeaderMap, expected_key: &str) -> bool {
+    let bearer_valid = headers
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected_key);
+
+    let api_key_valid = headers
+        .get("X-Admin-Api-Key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| token == expected_key);
+
+    bearer_valid || api_key_valid
+}
+
 /// Create CORS layer for cross-origin requests
 fn create_cors_layer() -> CorsLayer {
     let allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_else(|_| {
@@ -277,7 +323,16 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
             post(submit_transfer_handler).get(list_transfer_requests_handler),
         )
         .route("/{id}", get(get_transfer_request_handler))
+        .route("/{id}/audit-report", get(get_transfer_audit_report_handler))
         .route("/{id}/retry", post(retry_blockchain_handler));
+
+    let checkout_routes = Router::new()
+        .route("/sessions", post(create_checkout_session_handler))
+        .route("/sessions/{id}", get(get_checkout_session_handler))
+        .route(
+            "/sessions/{id}/submit-transfer",
+            post(submit_checkout_transfer_handler),
+        );
 
     // Health routes
     let health_routes = Router::new()
@@ -296,13 +351,18 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
             "/blocklist",
             post(add_blocklist_handler).get(list_blocklist_handler),
         )
-        .route("/blocklist/{address}", delete(remove_blocklist_handler));
+        .route("/blocklist/{address}", delete(remove_blocklist_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&app_state),
+            admin_auth_middleware,
+        ));
 
     // Compliance routes
     let compliance_routes = Router::new().route("/", post(risk_check_handler));
 
     Router::new()
         .nest("/transfer-requests", transfer_routes)
+        .nest("/checkout", checkout_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .nest("/admin", admin_routes)
@@ -335,7 +395,20 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
             post(submit_transfer_handler).get(list_transfer_requests_handler),
         )
         .route("/{id}", get(get_transfer_request_handler))
+        .route("/{id}/audit-report", get(get_transfer_audit_report_handler))
         .route("/{id}/retry", post(retry_blockchain_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&rate_limit_state),
+            rate_limit_transfers_middleware,
+        ));
+
+    let checkout_routes = Router::new()
+        .route("/sessions", post(create_checkout_session_handler))
+        .route("/sessions/{id}", get(get_checkout_session_handler))
+        .route(
+            "/sessions/{id}/submit-transfer",
+            post(submit_checkout_transfer_handler),
+        )
         .layer(middleware::from_fn_with_state(
             Arc::clone(&rate_limit_state),
             rate_limit_transfers_middleware,
@@ -364,6 +437,10 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
         )
         .route("/blocklist/{address}", delete(remove_blocklist_handler))
         .layer(middleware::from_fn_with_state(
+            Arc::clone(&app_state),
+            admin_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
             Arc::clone(&rate_limit_state),
             rate_limit_transfers_middleware,
         ));
@@ -379,6 +456,7 @@ pub fn create_router_with_rate_limit(app_state: Arc<AppState>, config: RateLimit
 
     Router::new()
         .nest("/transfer-requests", transfer_routes)
+        .nest("/checkout", checkout_routes)
         .nest("/webhooks", webhook_routes)
         .nest("/health", health_routes)
         .nest("/admin", admin_routes)

@@ -675,6 +675,277 @@ impl SubmitTransferRequest {
     }
 }
 
+// ============================================================================
+// Merchant Checkout Session Types
+// ============================================================================
+
+/// Payment session status for merchant checkout and virtual-card funding flows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutSessionStatus {
+    /// Session is open and waiting for a signed transfer.
+    #[default]
+    Open,
+    /// A compliant transfer has been accepted and queued/submitted.
+    TransferSubmitted,
+    /// The linked transfer settled on-chain.
+    Settled,
+    /// The linked transfer was rejected by compliance before settlement.
+    Rejected,
+    /// Session expired before a transfer was linked.
+    Expired,
+    /// The linked transfer failed or expired after submission.
+    Failed,
+}
+
+impl CheckoutSessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::TransferSubmitted => "transfer_submitted",
+            Self::Settled => "settled",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::str::FromStr for CheckoutSessionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "open" => Ok(Self::Open),
+            "transfer_submitted" => Ok(Self::TransferSubmitted),
+            "settled" => Ok(Self::Settled),
+            "rejected" => Ok(Self::Rejected),
+            "expired" => Ok(Self::Expired),
+            "failed" => Ok(Self::Failed),
+            _ => Err(format!("Invalid checkout session status: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for CheckoutSessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Request to create a merchant checkout or virtual-card funding session.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateCheckoutSessionRequest {
+    /// Merchant, wallet application, or card program identifier.
+    #[schema(example = "merchant_kz_001")]
+    pub merchant_id: String,
+    /// Merchant-side order, invoice, remittance, or card-funding reference.
+    #[schema(example = "INV-2026-00042")]
+    pub merchant_reference: String,
+    /// Destination Solana wallet that should receive settlement.
+    #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
+    pub destination_wallet: String,
+    /// Optional SPL token mint. None means native SOL; USDC uses its mint address.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(example = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
+    pub token_mint: Option<String>,
+    /// Amount in atomic units: lamports for SOL or raw token units for SPL tokens.
+    #[schema(example = 25_000_000)]
+    pub amount: u64,
+    /// Known customer wallet, if the merchant application already has it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(example = "HvwC9QSAzwEXkUkwqNNGhfNHoVqXJYfPvPZfQvJmHWcF")]
+    pub customer_wallet: Option<String>,
+    /// Optional expiration timestamp. Defaults to 30 minutes when omitted.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Optional merchant metadata for order/card/remittance reconciliation.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Option<Object>)]
+    pub merchant_metadata: Option<serde_json::Value>,
+}
+
+/// Durable checkout session returned to merchants and payment applications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct CheckoutSession {
+    /// Unique checkout session ID.
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub id: String,
+    /// Merchant, wallet application, or card program identifier.
+    #[schema(example = "merchant_kz_001")]
+    pub merchant_id: String,
+    /// Merchant-side order, invoice, remittance, or card-funding reference.
+    #[schema(example = "INV-2026-00042")]
+    pub merchant_reference: String,
+    /// Destination Solana wallet that should receive settlement.
+    #[schema(example = "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")]
+    pub destination_wallet: String,
+    /// Optional SPL token mint. None means native SOL.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token_mint: Option<String>,
+    /// Amount in atomic units.
+    #[schema(example = 25_000_000)]
+    pub amount: u64,
+    /// Known customer wallet, if supplied by the merchant.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub customer_wallet: Option<String>,
+    /// Current checkout status.
+    pub status: CheckoutSessionStatus,
+    /// Expiration timestamp for unpaid sessions.
+    pub expires_at: DateTime<Utc>,
+    /// Optional merchant metadata for reconciliation.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Option<Object>)]
+    pub merchant_metadata: Option<serde_json::Value>,
+    /// Linked transfer request after the customer submits a signed transfer.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub transfer_request_id: Option<String>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response returned after submitting a signed transfer to a checkout session.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CheckoutTransferSubmissionResponse {
+    /// Updated checkout session.
+    pub session: CheckoutSession,
+    /// Linked transfer request.
+    pub transfer_request: TransferRequest,
+}
+
+// ============================================================================
+// Compliance Audit Report Types
+// ============================================================================
+
+/// Asset classification used by the audit report.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAssetType {
+    /// Native SOL transfer.
+    NativeSol,
+    /// Public SPL token transfer.
+    SplToken,
+    /// Token-2022 confidential transfer.
+    Token2022Confidential,
+}
+
+/// Amount visibility in an audit report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "visibility", rename_all = "snake_case")]
+pub enum AuditAmount {
+    /// Public amount in atomic units.
+    Public {
+        /// Amount in lamports or raw token units.
+        amount: u64,
+    },
+    /// Confidential amount marker when Token-2022 ZK transfer details hide amount.
+    Confidential {
+        /// Stable marker for machine processing.
+        marker: String,
+    },
+}
+
+/// Internal blocklist evidence visible in the audit report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InternalBlocklistHit {
+    /// Address that matched the internal blocklist.
+    pub address: String,
+    /// Sender, recipient, or unknown when only historical rejection text is available.
+    pub role: String,
+    /// Stored blocklist reason.
+    pub reason: String,
+}
+
+/// Private/Jito submission and retry metadata visible in the audit report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct PrivateSubmissionAuditMetadata {
+    /// Original transaction signature tracked for double-spend prevention.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub original_tx_signature: Option<String>,
+    /// Last error classification used by retry logic.
+    pub last_error_type: LastErrorType,
+    /// Blockhash used for the latest known attempt.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blockhash_used: Option<String>,
+    /// Number of blockchain submission retries.
+    pub retry_count: i32,
+    /// Next scheduled retry time, if any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+/// Final machine-readable audit decision.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditFinalDecision {
+    /// Compliance accepted the transfer for settlement.
+    ApprovedForSettlement,
+    /// Compliance rejected the transfer before chain submission.
+    RejectedBeforeSettlement,
+    /// Transfer settled on-chain.
+    Settled,
+    /// Transfer failed or expired before final settlement.
+    FailedOrExpired,
+}
+
+/// Concise compliance and settlement audit report for a transfer request.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TransferAuditReport {
+    /// Transfer request ID.
+    pub transfer_id: String,
+    /// Sender wallet address.
+    pub sender_address: String,
+    /// Recipient wallet address.
+    pub recipient_address: String,
+    /// Asset classification.
+    pub asset_type: AuditAssetType,
+    /// Optional SPL/Token-2022 mint.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token_mint: Option<String>,
+    /// Public amount or confidential marker.
+    pub amount: AuditAmount,
+    /// Replay-protection nonce.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nonce: Option<String>,
+    /// Compliance status.
+    pub compliance_status: ComplianceStatus,
+    /// Blockchain settlement status.
+    pub blockchain_status: BlockchainStatus,
+    /// Human-readable risk decision summary.
+    pub risk_decision_summary: String,
+    /// Rejection or failure reason, if available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rejection_reason: Option<String>,
+    /// Active or historical internal blocklist hits.
+    pub internal_blocklist_hits: Vec<InternalBlocklistHit>,
+    /// Latest cached Range Protocol risk score, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub range_risk_score: Option<i32>,
+    /// Latest cached Range Protocol risk level, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub range_risk_level: Option<String>,
+    /// Latest cached Helius asset screening status, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub helius_asset_screening_status: Option<String>,
+    /// Blockchain signature after submission.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blockchain_signature: Option<String>,
+    /// Original transaction signature tracked for safe retry.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub original_tx_signature: Option<String>,
+    /// Jito/private submission and retry metadata, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub private_submission_metadata: Option<PrivateSubmissionAuditMetadata>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last update timestamp.
+    pub updated_at: DateTime<Utc>,
+    /// Final machine-readable decision.
+    pub final_decision: AuditFinalDecision,
+}
+
 /// Pagination parameters for list requests
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, ToSchema)]
 pub struct PaginationParams {

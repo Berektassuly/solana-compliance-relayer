@@ -9,6 +9,7 @@ Complete API reference for the Solana Compliance Relayer v0.3.0.
 - [Security & Authentication](#security--authentication)
 - [Data Type Specifications](#data-type-specifications)
 - [Core Endpoints](#core-endpoints)
+- [Merchant Checkout Endpoints](#merchant-checkout-endpoints)
 - [Admin Endpoints](#admin-endpoints)
 - [Compliance Endpoints](#compliance-endpoints)
 - [Webhook Endpoints](#webhook-endpoints)
@@ -33,29 +34,22 @@ Webhook endpoints validate incoming requests to prevent spoofing:
 | Provider | Header | Validation |
 |----------|--------|------------|
 | **Helius** | `Authorization` | Compared against `HELIUS_WEBHOOK_SECRET` env var. If configured and header missing or mismatched → `401 Unauthorized`. |
-| **QuickNode** | `x-qn-signature` or `Authorization` | Compared against `QUICKNODE_WEBHOOK_SECRET` env var. **Current behavior:** When the secret is set, missing or mismatched headers are logged but **not rejected** (validation is lenient for debugging). |
+| **QuickNode** | `x-qn-signature` or `Authorization` | Compared against `QUICKNODE_WEBHOOK_SECRET` env var. If configured and header missing or mismatched, returns `401 Unauthorized`. |
 
 > [!NOTE]
 > **Helius:** If `HELIUS_WEBHOOK_SECRET` is set and the `Authorization` header is missing or does not match, the request is rejected with `401 Unauthorized`.
 >
-> **QuickNode:** If `QUICKNODE_WEBHOOK_SECRET` is set, the relayer currently accepts requests even when the header is missing or mismatched (logs only). Restrict access at the network level if strict verification is required.
+> **QuickNode:** If `QUICKNODE_WEBHOOK_SECRET` is set, the relayer rejects requests unless either `x-qn-signature` or `Authorization` exactly matches the configured secret.
 
 ### Replay Attack Protection
 
 The server **tracks all nonces** in the database. Each `(from_address, nonce)` pair can only be used once. Duplicate submissions return the existing request (HTTP 200) rather than creating a duplicate.
 
-> [!CAUTION]
-> **Admin Endpoints Lack Application-Level Authentication**
->
-> The `/admin/*` routes currently have **no authentication middleware**. They are intended for internal operations only.
->
-> **Deployment Requirement:** Restrict access at the network level using:
-> - VPN-only access
-> - Internal network isolation
-> - Reverse proxy with IP allowlisting
-> - Kubernetes NetworkPolicy
->
-> **Do NOT expose `/admin/*` routes to the public internet.**
+### Admin Authentication
+
+When `ADMIN_API_KEY` is configured, every `/admin/*` route requires either `Authorization: Bearer <key>` or `X-Admin-Api-Key: <key>`. Missing or invalid credentials return `401 Unauthorized`.
+
+If `ADMIN_API_KEY` is absent, admin routes remain open for local development only. Production deployments must set it and should still restrict admin access at the network layer.
 
 ---
 
@@ -265,6 +259,45 @@ Get a single transfer by ID.
 
 ---
 
+### GET /transfer-requests/{id}/audit-report
+
+Return a concise compliance and settlement audit report for a transfer. This endpoint is designed for merchants, wallet operators, remittance apps, card-funding programs, and judges who need to verify why a transfer was approved, rejected, settled, or failed.
+
+**Response (200 OK):**
+
+```json
+{
+  "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+  "sender_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "recipient_address": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+  "asset_type": "spl_token",
+  "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "amount": {
+    "visibility": "public",
+    "amount": 25000000
+  },
+  "nonce": "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a",
+  "compliance_status": "approved",
+  "blockchain_status": "pending_submission",
+  "risk_decision_summary": "Approved by compliance controls and queued or submitted for settlement.",
+  "rejection_reason": null,
+  "internal_blocklist_hits": [],
+  "range_risk_score": 2,
+  "range_risk_level": "Low risk",
+  "helius_asset_screening_status": "clear",
+  "blockchain_signature": null,
+  "original_tx_signature": null,
+  "private_submission_metadata": null,
+  "created_at": "2026-01-30T10:30:00Z",
+  "updated_at": "2026-01-30T10:30:00Z",
+  "final_decision": "approved_for_settlement"
+}
+```
+
+`final_decision` is one of `approved_for_settlement`, `rejected_before_settlement`, `settled`, or `failed_or_expired`.
+
+---
+
 ### POST /transfer-requests/{id}/retry
 
 Manually retry a failed submission.
@@ -284,10 +317,102 @@ Manually retry a failed submission.
 
 ---
 
+## Merchant Checkout Endpoints
+
+Checkout sessions make the relayer usable as payment infrastructure for merchants, remittance apps, embedded finance products, and virtual-card funding flows. A merchant creates a session, the customer signs a matching transfer, and the relayer links that transfer to the session while reusing the same compliance and settlement pipeline as `POST /transfer-requests`.
+
+### POST /checkout/sessions
+
+Create a checkout session.
+
+**Request:**
+
+```json
+{
+  "merchant_id": "merchant_kz_001",
+  "merchant_reference": "INV-2026-00042",
+  "destination_wallet": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+  "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "amount": 25000000,
+  "customer_wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "merchant_metadata": {
+    "purpose": "virtual_card_funding",
+    "currency": "USDC"
+  }
+}
+```
+
+`amount` is always atomic units: `25000000` means `25.000000` USDC for a 6-decimal mint. If `expires_at` is omitted, the session expires after 30 minutes.
+
+**Response (200 OK):**
+
+```json
+{
+  "id": "7b6d4b7c-4a3f-41f5-81d1-57cc3d52f474",
+  "merchant_id": "merchant_kz_001",
+  "merchant_reference": "INV-2026-00042",
+  "destination_wallet": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+  "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "amount": 25000000,
+  "customer_wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "status": "open",
+  "expires_at": "2026-01-30T11:00:00Z",
+  "merchant_metadata": {
+    "purpose": "virtual_card_funding",
+    "currency": "USDC"
+  },
+  "transfer_request_id": null,
+  "created_at": "2026-01-30T10:30:00Z",
+  "updated_at": "2026-01-30T10:30:00Z"
+}
+```
+
+### GET /checkout/sessions/{id}
+
+Fetch a checkout session. If a transfer is linked, the returned `status` is derived from the linked transfer: `transfer_submitted`, `settled`, `rejected`, or `failed`.
+
+### POST /checkout/sessions/{id}/submit-transfer
+
+Submit the same signed public transfer payload used by `POST /transfer-requests`, but link it to a checkout session. The payload must match the session destination wallet, token mint, amount, and known customer wallet if supplied.
+
+**Request:**
+
+```json
+{
+  "from_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "to_address": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+  "transfer_details": {
+    "type": "public",
+    "amount": 25000000
+  },
+  "token_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "signature": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d...",
+  "nonce": "019470a4-7e7c-7d3e-8f1a-2b3c4d5e6f7a"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "session": {
+    "id": "7b6d4b7c-4a3f-41f5-81d1-57cc3d52f474",
+    "status": "transfer_submitted",
+    "transfer_request_id": "550e8400-e29b-41d4-a716-446655440000"
+  },
+  "transfer_request": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "compliance_status": "approved",
+    "blockchain_status": "pending_submission"
+  }
+}
+```
+
+---
+
 ## Admin Endpoints
 
-> [!CAUTION]
-> These endpoints have **no application-level authentication**. Restrict access at the network level.
+When `ADMIN_API_KEY` is configured, all endpoints in this section require `Authorization: Bearer <key>` or `X-Admin-Api-Key: <key>`.
 
 ### POST /admin/blocklist
 
@@ -418,13 +543,13 @@ Receives transaction events from QuickNode Streams/Webhooks.
 
 **Authentication Header (one of):**
 
-| Header | Format | Priority |
-|--------|--------|----------|
-| `x-qn-signature` | `<QUICKNODE_WEBHOOK_SECRET>` | Checked first |
-| `Authorization` | `<QUICKNODE_WEBHOOK_SECRET>` | Fallback if `x-qn-signature` is absent |
+| Header | Format | Notes |
+|--------|--------|-------|
+| `x-qn-signature` | `<QUICKNODE_WEBHOOK_SECRET>` | Accepted if it exactly matches |
+| `Authorization` | `<QUICKNODE_WEBHOOK_SECRET>` | Accepted if it exactly matches |
 
 > [!NOTE]
-> When `QUICKNODE_WEBHOOK_SECRET` is set, missing or mismatched headers are **not** currently rejected; the request is accepted and a warning is logged. Use network-level restrictions if strict verification is required.
+> When `QUICKNODE_WEBHOOK_SECRET` is set, missing or mismatched headers are rejected with `401 Unauthorized`.
 >
 > QuickNode Streams typically send `x-qn-signature`, but some configurations may use `Authorization`. The relayer accepts **either** header for flexibility.
 
@@ -550,7 +675,7 @@ The message to sign is a **UTF-8 encoded string** with the following format:
 |------|---------|
 | `200` | Success (or idempotent duplicate) |
 | `400` | Validation error (invalid signature, missing fields, wrong types) |
-| `401` | Authentication failed (webhook secret mismatch; Helius only) |
+| `401` | Authentication failed (admin API key or webhook secret missing/mismatched) |
 | `402` | Payment required (insufficient funds for transaction) |
 | `403` | Authorization denied (signature verification failed) |
 | `404` | Resource not found |

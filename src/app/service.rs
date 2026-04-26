@@ -1,14 +1,17 @@
 //! Application service layer with graceful degradation.
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
 use validator::Validate;
 
 use crate::domain::{
-    AppError, BlockchainClient, BlockchainStatus, ComplianceStatus, DatabaseClient, HealthResponse,
-    HealthStatus, HeliusTransaction, LastErrorType, PaginatedResponse, QuickNodeWebhookEvent,
-    SubmitTransferRequest, TransactionStatus, TransferRequest, ValidationError,
+    AppError, AuditAmount, AuditAssetType, AuditFinalDecision, BlockchainClient, BlockchainStatus,
+    CheckoutSession, CheckoutSessionStatus, CheckoutTransferSubmissionResponse, ComplianceStatus,
+    CreateCheckoutSessionRequest, DatabaseClient, HealthResponse, HealthStatus, HeliusTransaction,
+    InternalBlocklistHit, LastErrorType, PaginatedResponse, PrivateSubmissionAuditMetadata,
+    QuickNodeWebhookEvent, SubmitTransferRequest, TransactionStatus, TransferAuditReport,
+    TransferRequest, TransferType, ValidationError,
 };
 use crate::infra::BlocklistManager;
 
@@ -17,6 +20,13 @@ const MAX_RETRY_ATTEMPTS: i32 = 10;
 
 /// Maximum backoff duration in seconds (5 minutes)
 const MAX_BACKOFF_SECS: i64 = 300;
+
+/// Default checkout session lifetime: 30 minutes.
+const DEFAULT_CHECKOUT_SESSION_TTL_SECS: i64 = 30 * 60;
+
+/// Risk profiles are operational cache, but audit reports can use older cached
+/// profiles as evidence when available.
+const AUDIT_RISK_PROFILE_MAX_AGE_SECS: i64 = 10 * 365 * 24 * 60 * 60;
 
 /// Application service containing business logic
 pub struct AppService {
@@ -265,6 +275,240 @@ impl AppService {
         cursor: Option<&str>,
     ) -> Result<PaginatedResponse<TransferRequest>, AppError> {
         self.db_client.list_transfer_requests(limit, cursor).await
+    }
+
+    // =========================================================================
+    // Merchant Checkout Sessions
+    // =========================================================================
+
+    /// Create a merchant checkout or virtual-card funding session.
+    #[instrument(skip(self, request), fields(merchant_id = %request.merchant_id, merchant_reference = %request.merchant_reference))]
+    pub async fn create_checkout_session(
+        &self,
+        request: &CreateCheckoutSessionRequest,
+    ) -> Result<CheckoutSession, AppError> {
+        validate_checkout_session_request(request)?;
+
+        let expires_at = request
+            .expires_at
+            .unwrap_or_else(|| Utc::now() + Duration::seconds(DEFAULT_CHECKOUT_SESSION_TTL_SECS));
+
+        if expires_at <= Utc::now() {
+            return Err(AppError::Validation(ValidationError::InvalidField {
+                field: "expires_at".to_string(),
+                message: "Expiration must be in the future".to_string(),
+            }));
+        }
+
+        self.db_client
+            .create_checkout_session(request, expires_at)
+            .await
+    }
+
+    /// Fetch a checkout session and derive live status from the linked transfer when present.
+    #[instrument(skip(self))]
+    pub async fn get_checkout_session(
+        &self,
+        id: &str,
+    ) -> Result<Option<CheckoutSession>, AppError> {
+        let Some(mut session) = self.db_client.get_checkout_session(id).await? else {
+            return Ok(None);
+        };
+
+        self.hydrate_checkout_status(&mut session).await?;
+        Ok(Some(session))
+    }
+
+    /// Submit a signed transfer to an existing checkout session.
+    ///
+    /// This reuses the existing transfer pipeline so compliance, replay protection,
+    /// private submission, and audit behavior stay identical to POST /transfer-requests.
+    #[instrument(skip(self, payload), fields(session_id = %session_id, nonce = %payload.nonce))]
+    pub async fn submit_checkout_transfer(
+        &self,
+        session_id: &str,
+        payload: &SubmitTransferRequest,
+    ) -> Result<CheckoutTransferSubmissionResponse, AppError> {
+        let mut session = self
+            .db_client
+            .get_checkout_session(session_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Database(crate::domain::DatabaseError::NotFound(
+                    session_id.to_string(),
+                ))
+            })?;
+
+        self.hydrate_checkout_status(&mut session).await?;
+
+        if session.status == CheckoutSessionStatus::Expired {
+            return Err(AppError::Validation(ValidationError::InvalidField {
+                field: "session".to_string(),
+                message: "Checkout session has expired".to_string(),
+            }));
+        }
+
+        if let Some(existing_transfer_id) = session.transfer_request_id.as_deref() {
+            let transfer = self
+                .db_client
+                .get_transfer_request(existing_transfer_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Database(crate::domain::DatabaseError::NotFound(
+                        existing_transfer_id.to_string(),
+                    ))
+                })?;
+            session.status = checkout_status_from_transfer(&transfer, session.expires_at);
+            return Ok(CheckoutTransferSubmissionResponse {
+                session,
+                transfer_request: transfer,
+            });
+        }
+
+        validate_checkout_transfer_matches_session(&session, payload)?;
+
+        let transfer = self.submit_transfer(payload).await?;
+        let status = checkout_status_from_transfer(&transfer, session.expires_at);
+        let session = self
+            .db_client
+            .link_checkout_session_transfer(&session.id, &transfer.id, status)
+            .await?;
+
+        Ok(CheckoutTransferSubmissionResponse {
+            session,
+            transfer_request: transfer,
+        })
+    }
+
+    /// Build a compliance and settlement audit report for a transfer.
+    #[instrument(skip(self))]
+    pub async fn get_transfer_audit_report(
+        &self,
+        id: &str,
+    ) -> Result<Option<TransferAuditReport>, AppError> {
+        let Some(transfer) = self.db_client.get_transfer_request(id).await? else {
+            return Ok(None);
+        };
+
+        let risk_profile = self
+            .db_client
+            .get_risk_profile(&transfer.to_address, AUDIT_RISK_PROFILE_MAX_AGE_SECS)
+            .await?;
+
+        let (range_risk_score, range_risk_level, helius_asset_screening_status) =
+            if let Some(profile) = risk_profile {
+                let helius_status = if profile.helius_assets_checked {
+                    if profile.has_sanctioned_assets {
+                        Some("sanctioned_assets_detected".to_string())
+                    } else {
+                        Some("clear".to_string())
+                    }
+                } else {
+                    Some("not_checked".to_string())
+                };
+                (profile.risk_score, profile.risk_level, helius_status)
+            } else {
+                (None, None, None)
+            };
+
+        let internal_blocklist_hits = self.collect_blocklist_hits(&transfer);
+        let rejection_reason = transfer.blockchain_last_error.clone();
+        let final_decision = audit_final_decision(&transfer);
+        let risk_decision_summary =
+            audit_risk_decision_summary(&transfer, rejection_reason.as_deref());
+        let private_submission_metadata = private_submission_metadata(&transfer);
+
+        let (asset_type, amount) = match &transfer.transfer_details {
+            TransferType::Public { amount } => {
+                let asset_type = if transfer.token_mint.is_some() {
+                    AuditAssetType::SplToken
+                } else {
+                    AuditAssetType::NativeSol
+                };
+                (asset_type, AuditAmount::Public { amount: *amount })
+            }
+            TransferType::Confidential { .. } => (
+                AuditAssetType::Token2022Confidential,
+                AuditAmount::Confidential {
+                    marker: "token_2022_confidential_amount".to_string(),
+                },
+            ),
+        };
+
+        Ok(Some(TransferAuditReport {
+            transfer_id: transfer.id,
+            sender_address: transfer.from_address,
+            recipient_address: transfer.to_address,
+            asset_type,
+            token_mint: transfer.token_mint,
+            amount,
+            nonce: transfer.nonce,
+            compliance_status: transfer.compliance_status,
+            blockchain_status: transfer.blockchain_status,
+            risk_decision_summary,
+            rejection_reason,
+            internal_blocklist_hits,
+            range_risk_score,
+            range_risk_level,
+            helius_asset_screening_status,
+            blockchain_signature: transfer.blockchain_signature,
+            original_tx_signature: transfer.original_tx_signature,
+            private_submission_metadata,
+            created_at: transfer.created_at,
+            updated_at: transfer.updated_at,
+            final_decision,
+        }))
+    }
+
+    async fn hydrate_checkout_status(&self, session: &mut CheckoutSession) -> Result<(), AppError> {
+        if let Some(transfer_id) = session.transfer_request_id.as_deref()
+            && let Some(transfer) = self.db_client.get_transfer_request(transfer_id).await?
+        {
+            session.status = checkout_status_from_transfer(&transfer, session.expires_at);
+            return Ok(());
+        }
+
+        if session.status == CheckoutSessionStatus::Open && session.expires_at <= Utc::now() {
+            session.status = CheckoutSessionStatus::Expired;
+        }
+
+        Ok(())
+    }
+
+    fn collect_blocklist_hits(&self, transfer: &TransferRequest) -> Vec<InternalBlocklistHit> {
+        let mut hits = Vec::new();
+
+        if let Some(blocklist) = &self.blocklist {
+            if let Some(reason) = blocklist.check_address(&transfer.from_address) {
+                hits.push(InternalBlocklistHit {
+                    address: transfer.from_address.clone(),
+                    role: "sender".to_string(),
+                    reason,
+                });
+            }
+            if let Some(reason) = blocklist.check_address(&transfer.to_address) {
+                hits.push(InternalBlocklistHit {
+                    address: transfer.to_address.clone(),
+                    role: "recipient".to_string(),
+                    reason,
+                });
+            }
+        }
+
+        if hits.is_empty()
+            && let Some(reason) = transfer
+                .blockchain_last_error
+                .as_deref()
+                .and_then(|error| error.strip_prefix("Blocklist: "))
+        {
+            hits.push(InternalBlocklistHit {
+                address: transfer.to_address.clone(),
+                role: "unknown".to_string(),
+                reason: reason.to_string(),
+            });
+        }
+
+        hits
     }
 
     /// Retry blockchain submission for a specific request
@@ -1114,6 +1358,203 @@ fn extract_blockhash_from_error(error: &AppError) -> Option<String> {
         }) => Some(blockhash.clone()),
         _ => None,
     }
+}
+
+fn validate_checkout_session_request(
+    request: &CreateCheckoutSessionRequest,
+) -> Result<(), AppError> {
+    if request.merchant_id.trim().is_empty() {
+        return Err(AppError::Validation(ValidationError::MissingField(
+            "merchant_id".to_string(),
+        )));
+    }
+    if request.merchant_reference.trim().is_empty() {
+        return Err(AppError::Validation(ValidationError::MissingField(
+            "merchant_reference".to_string(),
+        )));
+    }
+    if request.destination_wallet.trim().is_empty() {
+        return Err(AppError::Validation(ValidationError::MissingField(
+            "destination_wallet".to_string(),
+        )));
+    }
+    if request.amount == 0 {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "amount".to_string(),
+            message: "Amount must be greater than 0".to_string(),
+        }));
+    }
+    if request
+        .token_mint
+        .as_deref()
+        .is_some_and(|mint| mint.trim().is_empty())
+    {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "token_mint".to_string(),
+            message: "Token mint cannot be empty when provided".to_string(),
+        }));
+    }
+    if request
+        .customer_wallet
+        .as_deref()
+        .is_some_and(|wallet| wallet.trim().is_empty())
+    {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "customer_wallet".to_string(),
+            message: "Customer wallet cannot be empty when provided".to_string(),
+        }));
+    }
+    if request
+        .merchant_metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_object())
+    {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "merchant_metadata".to_string(),
+            message: "Merchant metadata must be a JSON object".to_string(),
+        }));
+    }
+
+    Ok(())
+}
+
+fn validate_checkout_transfer_matches_session(
+    session: &CheckoutSession,
+    payload: &SubmitTransferRequest,
+) -> Result<(), AppError> {
+    if payload.to_address != session.destination_wallet {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "to_address".to_string(),
+            message: "Transfer recipient must match checkout destination wallet".to_string(),
+        }));
+    }
+
+    if payload.token_mint != session.token_mint {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "token_mint".to_string(),
+            message: "Transfer token mint must match checkout session".to_string(),
+        }));
+    }
+
+    if let Some(customer_wallet) = session.customer_wallet.as_deref()
+        && payload.from_address != customer_wallet
+    {
+        return Err(AppError::Validation(ValidationError::InvalidField {
+            field: "from_address".to_string(),
+            message: "Transfer sender must match checkout customer wallet".to_string(),
+        }));
+    }
+
+    match &payload.transfer_details {
+        TransferType::Public { amount } if *amount == session.amount => Ok(()),
+        TransferType::Public { .. } => Err(AppError::Validation(ValidationError::InvalidField {
+            field: "amount".to_string(),
+            message: "Transfer amount must match checkout session amount".to_string(),
+        })),
+        TransferType::Confidential { .. } => {
+            Err(AppError::Validation(ValidationError::InvalidField {
+                field: "transfer_details".to_string(),
+                message: "Checkout sessions require public SOL or SPL token transfer payloads"
+                    .to_string(),
+            }))
+        }
+    }
+}
+
+fn checkout_status_from_transfer(
+    transfer: &TransferRequest,
+    expires_at: DateTime<Utc>,
+) -> CheckoutSessionStatus {
+    if transfer.compliance_status == ComplianceStatus::Rejected {
+        return CheckoutSessionStatus::Rejected;
+    }
+
+    match transfer.blockchain_status {
+        BlockchainStatus::Confirmed => CheckoutSessionStatus::Settled,
+        BlockchainStatus::Failed | BlockchainStatus::Expired => CheckoutSessionStatus::Failed,
+        BlockchainStatus::Pending
+        | BlockchainStatus::Received
+        | BlockchainStatus::PendingSubmission
+        | BlockchainStatus::Processing
+        | BlockchainStatus::Submitted => CheckoutSessionStatus::TransferSubmitted,
+    }
+    .or_expired(expires_at)
+}
+
+trait CheckoutStatusExpiry {
+    fn or_expired(self, expires_at: DateTime<Utc>) -> Self;
+}
+
+impl CheckoutStatusExpiry for CheckoutSessionStatus {
+    fn or_expired(self, expires_at: DateTime<Utc>) -> Self {
+        if self == CheckoutSessionStatus::Open && expires_at <= Utc::now() {
+            CheckoutSessionStatus::Expired
+        } else {
+            self
+        }
+    }
+}
+
+fn audit_final_decision(transfer: &TransferRequest) -> AuditFinalDecision {
+    if transfer.blockchain_status == BlockchainStatus::Confirmed {
+        return AuditFinalDecision::Settled;
+    }
+    if transfer.compliance_status == ComplianceStatus::Rejected {
+        return AuditFinalDecision::RejectedBeforeSettlement;
+    }
+    if matches!(
+        transfer.blockchain_status,
+        BlockchainStatus::Failed | BlockchainStatus::Expired
+    ) {
+        return AuditFinalDecision::FailedOrExpired;
+    }
+    AuditFinalDecision::ApprovedForSettlement
+}
+
+fn audit_risk_decision_summary(
+    transfer: &TransferRequest,
+    rejection_reason: Option<&str>,
+) -> String {
+    match audit_final_decision(transfer) {
+        AuditFinalDecision::Settled => {
+            "Transfer settled on-chain after compliance approval.".to_string()
+        }
+        AuditFinalDecision::RejectedBeforeSettlement => format!(
+            "Rejected before settlement: {}",
+            rejection_reason.unwrap_or("compliance policy rejected the transfer")
+        ),
+        AuditFinalDecision::FailedOrExpired => format!(
+            "Transfer did not settle: {}",
+            rejection_reason.unwrap_or("blockchain submission failed or expired")
+        ),
+        AuditFinalDecision::ApprovedForSettlement => {
+            if transfer.compliance_status == ComplianceStatus::Approved {
+                "Approved by compliance controls and queued or submitted for settlement."
+                    .to_string()
+            } else {
+                "Compliance decision pending; transfer has not reached final settlement."
+                    .to_string()
+            }
+        }
+    }
+}
+
+fn private_submission_metadata(
+    transfer: &TransferRequest,
+) -> Option<PrivateSubmissionAuditMetadata> {
+    let has_metadata = transfer.original_tx_signature.is_some()
+        || transfer.blockhash_used.is_some()
+        || transfer.blockchain_retry_count > 0
+        || transfer.last_error_type != LastErrorType::None
+        || transfer.blockchain_next_retry_at.is_some();
+
+    has_metadata.then(|| PrivateSubmissionAuditMetadata {
+        original_tx_signature: transfer.original_tx_signature.clone(),
+        last_error_type: transfer.last_error_type,
+        blockhash_used: transfer.blockhash_used.clone(),
+        retry_count: transfer.blockchain_retry_count,
+        next_retry_at: transfer.blockchain_next_retry_at,
+    })
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ This document details the security hardening features implemented in the Solana 
 - [Jito Bundle Integration (MEV Protection)](#jito-bundle-integration-mev-protection)
 - [Double-Spend Protection](#double-spend-protection)
 - [Replay Attack Protection](#replay-attack-protection)
+- [Admin and Webhook Authentication](#admin-and-webhook-authentication)
 - [Internal Blocklist Manager](#internal-blocklist-manager)
 - [Enterprise Security Summary](#enterprise-security-summary)
 
@@ -184,6 +185,37 @@ The `Idempotency-Key` header enables safe retries:
 
 ---
 
+## Admin and Webhook Authentication
+
+### Admin Routes
+
+The `/admin/*` routes are protected by application-level authentication when `ADMIN_API_KEY` is configured.
+
+Accepted credentials:
+
+```http
+Authorization: Bearer <ADMIN_API_KEY>
+```
+
+```http
+X-Admin-Api-Key: <ADMIN_API_KEY>
+```
+
+Missing or invalid credentials return `401 Unauthorized`. If `ADMIN_API_KEY` is absent, admin authentication is disabled to keep local development usable. Production deployments must set `ADMIN_API_KEY` and should still keep admin routes behind private networking, VPN, IP allowlisting, or a trusted reverse proxy.
+
+### Webhook Routes
+
+Webhook authentication is fail-closed when a provider secret is configured:
+
+| Provider | Required secret | Accepted header | Failure behavior |
+|----------|-----------------|-----------------|------------------|
+| Helius | `HELIUS_WEBHOOK_SECRET` | `Authorization` | Missing or mismatched header returns `401 Unauthorized` |
+| QuickNode | `QUICKNODE_WEBHOOK_SECRET` | `x-qn-signature` or `Authorization` | Missing or mismatched header returns `401 Unauthorized` |
+
+Secrets are compared exactly and are not logged. If a webhook secret is absent, authentication for that provider is disabled for development and testing only.
+
+---
+
 ## Internal Blocklist Manager
 
 The relayer includes a high-performance internal blocklist that acts as a "hot cache" for screening malicious addresses **before** querying external compliance providers like Range Protocol.
@@ -226,6 +258,7 @@ The relayer includes a high-performance internal blocklist that acts as a "hot c
 ```bash
 # Add an address to the blocklist (JSON body)
 curl -X POST http://localhost:3000/admin/blocklist \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "address": "SuspiciousWallet123...",
@@ -233,10 +266,12 @@ curl -X POST http://localhost:3000/admin/blocklist \
   }'
 
 # List all blocklisted addresses
-curl http://localhost:3000/admin/blocklist
+curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+  http://localhost:3000/admin/blocklist
 
 # Remove an address from the blocklist
-curl -X DELETE http://localhost:3000/admin/blocklist/SuspiciousWallet123...
+curl -X DELETE http://localhost:3000/admin/blocklist/SuspiciousWallet123... \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
 ```
 
 ### Pre-Seeded Blocklist
@@ -261,5 +296,6 @@ When Range Protocol returns a high-risk score (≥ configured threshold, default
 | **Double-Spend Protection** | Retry logic queries on-chain status (`getSignatureStatuses`) for the original signature before re-broadcasting after `JitoStateUnknown`. Reschedules instead of retrying when status cannot be verified. |
 | **Smart Rent Recovery** | For confidential (ZK) transfers, the relayer closes ephemeral ZK-proof context accounts after the transfer, recovering rent-exempt lamports to the relayer. |
 | **Dual-Confirmation System** | Real-time transaction status updates via QuickNode Streams (Webhooks) and Helius Enhanced Webhooks; stale-transaction crank polls `getSignatureStatuses` when webhooks are missed. |
+| **Authenticated Admin and Webhooks** | `/admin/*` requires `ADMIN_API_KEY` in production; Helius and QuickNode webhooks return `401 Unauthorized` when configured secrets are missing or mismatched. |
 | **Replay Attack Protection** | Cryptographic nonces in signed messages (`{from}:{to}:{amount}:{mint}:{nonce}`) prevent request replay; idempotency keys enable safe retries. |
 | **Multi-Layer Compliance** | Internal blocklist (DashMap + PostgreSQL) + Range Protocol + Helius DAS; high-risk addresses from Range are auto-added to the blocklist. |

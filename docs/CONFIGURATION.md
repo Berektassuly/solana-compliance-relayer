@@ -25,7 +25,9 @@ Create a `.env` file in the project root. See [`.env.example`](../.env.example) 
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `SOLANA_RPC_URL` | No | Solana RPC endpoint (default: `https://api.devnet.solana.com`). Production: use Helius or QuickNode |
 | `ISSUER_PRIVATE_KEY` | Yes | Base58 relayer wallet private key |
+| `ADMIN_API_KEY` | Production | API key required for `/admin/*` routes in production |
 | `HELIUS_WEBHOOK_SECRET` | Recommended | Authorization header for Helius webhook validation |
+| `QUICKNODE_WEBHOOK_SECRET` | Recommended | `x-qn-signature` or `Authorization` value for strict QuickNode webhook validation |
 | `RANGE_API_KEY` | No | Range Protocol API key (mock mode if absent) |
 | `RANGE_API_URL` | No | Override Range API base URL (default: `https://api.range.org/v1`) |
 | `RANGE_RISK_THRESHOLD` | No | Risk score threshold 1–10 (default: 6 = High Risk); ≥ threshold = reject |
@@ -94,7 +96,17 @@ Tune anonymity-set health checks for confidential transfers. Only used when `ENA
 | Variable | Description |
 |----------|-------------|
 | `HELIUS_WEBHOOK_SECRET` | Authorization header value for validating Helius webhook requests |
-| `QUICKNODE_WEBHOOK_SECRET` | Authorization header value for validating QuickNode Streams requests |
+| `QUICKNODE_WEBHOOK_SECRET` | Exact value accepted in `x-qn-signature` or `Authorization` for QuickNode Streams requests |
+
+When a webhook secret is configured, missing or mismatched webhook credentials return `401 Unauthorized`.
+
+### Admin Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ADMIN_API_KEY` | Enables application-level authentication for `/admin/*` routes. Clients must send `Authorization: Bearer <key>` or `X-Admin-Api-Key: <key>`. |
+
+If `ADMIN_API_KEY` is absent, admin routes are left open for local development. Production deployments must set it and should keep admin routes behind private networking or a trusted reverse proxy.
 
 ---
 
@@ -146,6 +158,7 @@ DATABASE_URL=postgres://user:pass@host:5432/compliance_relayer
 # Blockchain (Helius)
 SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
 ISSUER_PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
+ADMIN_API_KEY=YOUR_ADMIN_API_KEY
 HELIUS_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 
 # Compliance
@@ -180,6 +193,7 @@ DATABASE_URL=postgres://user:pass@host:5432/compliance_relayer
 # Blockchain (QuickNode)
 SOLANA_RPC_URL=https://your-endpoint.solana-mainnet.quiknode.pro/YOUR_API_KEY
 ISSUER_PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
+ADMIN_API_KEY=YOUR_ADMIN_API_KEY
 QUICKNODE_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 
 # Jito MEV Protection (requires QuickNode "Lil' JIT" add-on)
@@ -273,6 +287,14 @@ Ensure PostgreSQL is reachable (e.g., via `DATABASE_URL`). Use [docker-compose](
    - **Type:** Enhanced Transactions
    - **Auth Header:** Your `HELIUS_WEBHOOK_SECRET` value
    - **Account Addresses:** Add your relayer wallet public key
+
+### QuickNode Webhook Configuration
+
+1. Go to QuickNode Dashboard and create a Stream/Webhook for the relayer wallet.
+2. Set the destination URL to `https://your-backend.railway.app/webhooks/quicknode`.
+3. Configure a secret value matching `QUICKNODE_WEBHOOK_SECRET`.
+4. The relayer accepts either `x-qn-signature: <secret>` or `Authorization: <secret>`.
+5. If the secret is configured and neither header matches exactly, the request is rejected with `401 Unauthorized`.
 
 ---
 

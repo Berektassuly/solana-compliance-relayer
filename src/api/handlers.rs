@@ -38,7 +38,14 @@ use crate::domain::{
         submit_transfer_handler,
         list_transfer_requests_handler,
         get_transfer_request_handler,
+        crate::api::audit::get_transfer_audit_report_handler,
         retry_blockchain_handler,
+        crate::api::checkout::create_checkout_session_handler,
+        crate::api::checkout::get_checkout_session_handler,
+        crate::api::checkout::submit_checkout_transfer_handler,
+        crate::api::admin::add_blocklist_handler,
+        crate::api::admin::list_blocklist_handler,
+        crate::api::admin::remove_blocklist_handler,
         health_check_handler,
         liveness_handler,
         readiness_handler,
@@ -48,8 +55,19 @@ use crate::domain::{
         schemas(
             TransferRequest,
             SubmitTransferRequest,
+            crate::domain::CheckoutSession,
+            crate::domain::CreateCheckoutSessionRequest,
+            crate::domain::CheckoutTransferSubmissionResponse,
+            crate::domain::CheckoutSessionStatus,
+            crate::domain::TransferAuditReport,
+            crate::domain::AuditAssetType,
+            crate::domain::AuditAmount,
+            crate::domain::AuditFinalDecision,
+            crate::domain::InternalBlocklistHit,
+            crate::domain::PrivateSubmissionAuditMetadata,
             crate::domain::ComplianceStatus,
             crate::domain::BlockchainStatus,
+            crate::domain::LastErrorType,
             PaginationParams,
             PaginatedResponse<TransferRequest>,
             HealthResponse,
@@ -59,10 +77,16 @@ use crate::domain::{
             RateLimitResponse,
             RiskCheckRequest,
             RiskCheckResult,
+            crate::api::admin::AddBlocklistRequest,
+            crate::api::admin::BlocklistResponse,
+            crate::api::admin::BlocklistEntryResponse,
+            crate::api::admin::ListBlocklistResponse,
         )
     ),
     tags(
         (name = "transfers", description = "Transfer request management endpoints"),
+        (name = "checkout", description = "Merchant checkout and virtual-card funding endpoints"),
+        (name = "admin", description = "Authenticated admin operations"),
         (name = "health", description = "Health check endpoints"),
         (name = "compliance", description = "Compliance and risk check endpoints")
     )
@@ -337,36 +361,30 @@ pub async fn quicknode_webhook_handler(
         "QuickNode webhook received - raw payload"
     );
 
-    // Validate webhook secret if configured
-    // QuickNode uses x-qn-signature header for HMAC validation
+    // Validate webhook secret if configured.
     if let Some(expected_secret) = &state.quicknode_webhook_secret {
-        // QuickNode can use either x-qn-signature (HMAC) or Authorization header
-        let auth_header = headers
-            .get("x-qn-signature")
-            .or_else(|| headers.get("Authorization"))
-            .and_then(|v| v.to_str().ok());
+        let qn_signature = headers.get("x-qn-signature").and_then(|v| v.to_str().ok());
+        let authorization = headers.get("Authorization").and_then(|v| v.to_str().ok());
 
-        // Log the headers for debugging
         info!(
-            has_qn_signature = headers.get("x-qn-signature").is_some(),
-            has_authorization = headers.get("Authorization").is_some(),
+            has_qn_signature = qn_signature.is_some(),
+            has_authorization = authorization.is_some(),
             "QuickNode webhook headers"
         );
 
-        // If secret is configured but no auth header, still accept (log warning)
-        // This prevents 422 errors while we figure out the correct header format
-        if let Some(auth) = auth_header {
-            if auth != expected_secret {
-                info!(
-                    expected_len = expected_secret.len(),
-                    received_len = auth.len(),
-                    "QuickNode webhook secret mismatch (accepting anyway for debugging)"
-                );
-                // For now, don't reject - just log and continue
-                // return Err(AppError::Authentication("Invalid webhook secret".to_string()));
+        let has_matching_secret = qn_signature.is_some_and(|value| value == expected_secret)
+            || authorization.is_some_and(|value| value == expected_secret);
+
+        if !has_matching_secret {
+            if qn_signature.is_some() || authorization.is_some() {
+                return Err(AppError::Authentication(
+                    "Invalid QuickNode webhook secret".to_string(),
+                ));
+            } else {
+                return Err(AppError::Authentication(
+                    "Missing QuickNode webhook secret".to_string(),
+                ));
             }
-        } else {
-            info!("QuickNode webhook: No auth header present (accepting for debugging)");
         }
     }
 

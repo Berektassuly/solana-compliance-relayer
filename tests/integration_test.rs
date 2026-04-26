@@ -13,8 +13,9 @@ use tower::ServiceExt;
 use solana_compliance_relayer::api::create_router;
 use solana_compliance_relayer::app::AppState;
 use solana_compliance_relayer::domain::{
-    BlockchainStatus, HealthResponse, HealthStatus, PaginatedResponse, SubmitTransferRequest,
-    TransferRequest, TransferType,
+    AuditFinalDecision, BlockchainStatus, CheckoutSession, CheckoutSessionStatus,
+    CheckoutTransferSubmissionResponse, CreateCheckoutSessionRequest, HealthResponse, HealthStatus,
+    PaginatedResponse, SubmitTransferRequest, TransferAuditReport, TransferRequest, TransferType,
 };
 use solana_compliance_relayer::test_utils::{
     MockBlockchainClient, MockComplianceProvider, MockDatabaseClient,
@@ -66,6 +67,29 @@ fn create_test_state() -> Arc<AppState> {
     Arc::new(AppState::new(db as _, blockchain as _, compliance as _))
 }
 
+fn create_test_state_with_quicknode_secret(secret: &str) -> Arc<AppState> {
+    let db = Arc::new(MockDatabaseClient::new());
+    let blockchain = Arc::new(MockBlockchainClient::new());
+    let compliance = Arc::new(MockComplianceProvider::new());
+    Arc::new(AppState::with_webhook_secrets(
+        db as _,
+        blockchain as _,
+        compliance as _,
+        None,
+        Some(secret.to_string()),
+    ))
+}
+
+fn create_test_state_with_admin_key(key: Option<&str>) -> Arc<AppState> {
+    let db = Arc::new(MockDatabaseClient::new());
+    let blockchain = Arc::new(MockBlockchainClient::new());
+    let compliance = Arc::new(MockComplianceProvider::new());
+    Arc::new(
+        AppState::new(db as _, blockchain as _, compliance as _)
+            .with_admin_api_key(key.map(ToString::to_string)),
+    )
+}
+
 #[tokio::test]
 async fn test_submit_transfer_success() {
     let state = create_test_state();
@@ -88,6 +112,125 @@ async fn test_submit_transfer_success() {
     let tr: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(tr.from_address, expected_from);
     assert_eq!(tr.blockchain_status, BlockchainStatus::PendingSubmission);
+}
+
+#[tokio::test]
+async fn test_admin_routes_require_api_key_when_configured() {
+    let state = create_test_state_with_admin_key(Some("admin_test_key"));
+    let router = create_router(state);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/blocklist")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/blocklist")
+        .header("Authorization", "Bearer wrong_key")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/blocklist")
+        .header("Authorization", "Bearer admin_test_key")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/blocklist")
+        .header("X-Admin-Api-Key", "admin_test_key")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn test_admin_routes_allow_local_dev_when_key_absent() {
+    let state = create_test_state_with_admin_key(None);
+    let router = create_router(state);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/blocklist")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn test_quicknode_webhook_authentication_is_strict_when_secret_configured() {
+    let state = create_test_state_with_quicknode_secret("qn_test_secret");
+    let router = create_router(state);
+    let body = Body::from(r#"{"signature":"sig_123"}"#);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webhooks/quicknode")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webhooks/quicknode")
+        .header("Content-Type", "application/json")
+        .header("x-qn-signature", "wrong_secret")
+        .body(Body::from(r#"{"signature":"sig_123"}"#))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webhooks/quicknode")
+        .header("Content-Type", "application/json")
+        .header("x-qn-signature", "qn_test_secret")
+        .body(Body::from(r#"{"signature":"sig_123"}"#))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webhooks/quicknode")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "qn_test_secret")
+        .body(Body::from(r#"{"signature":"sig_123"}"#))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_quicknode_webhook_accepts_either_matching_auth_header() {
+    let state = create_test_state_with_quicknode_secret("qn_test_secret");
+    let router = create_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webhooks/quicknode")
+        .header("Content-Type", "application/json")
+        .header("x-qn-signature", "wrong_secret")
+        .header("Authorization", "qn_test_secret")
+        .body(Body::from(r#"{"signature":"sig_123"}"#))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -133,6 +276,162 @@ async fn test_list_requests_empty() {
     assert!(result.items.is_empty());
     assert!(!result.has_more);
     assert!(result.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn test_checkout_session_create_fetch_and_submit_transfer() {
+    let state = create_test_state();
+    let router = create_router(state);
+    let transfer_payload = create_signed_transfer_request(0, 77, 25_000_000);
+
+    let checkout_payload = CreateCheckoutSessionRequest {
+        merchant_id: "merchant_kz_001".to_string(),
+        merchant_reference: "INV-2026-00042".to_string(),
+        destination_wallet: transfer_payload.to_address.clone(),
+        token_mint: None,
+        amount: 25_000_000,
+        customer_wallet: Some(transfer_payload.from_address.clone()),
+        expires_at: None,
+        merchant_metadata: Some(serde_json::json!({
+            "purpose": "virtual_card_funding",
+            "currency": "USDC"
+        })),
+    };
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/checkout/sessions")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&checkout_payload).unwrap(),
+        ))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let session: CheckoutSession = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(session.status, CheckoutSessionStatus::Open);
+    assert_eq!(session.merchant_reference, "INV-2026-00042");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/checkout/sessions/{}", session.id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/checkout/sessions/{}/submit-transfer", session.id))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&transfer_payload).unwrap(),
+        ))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let linked: CheckoutTransferSubmissionResponse = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        linked.session.status,
+        CheckoutSessionStatus::TransferSubmitted
+    );
+    assert_eq!(
+        linked.session.transfer_request_id.as_deref(),
+        Some(linked.transfer_request.id.as_str())
+    );
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/checkout/sessions/{}", session.id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let fetched: CheckoutSession = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(fetched.status, CheckoutSessionStatus::TransferSubmitted);
+}
+
+#[tokio::test]
+async fn test_checkout_submit_rejects_mismatched_amount() {
+    let state = create_test_state();
+    let router = create_router(state);
+    let transfer_payload = create_signed_transfer_request(0, 78, 50_000_000);
+
+    let checkout_payload = CreateCheckoutSessionRequest {
+        merchant_id: "merchant_kz_001".to_string(),
+        merchant_reference: "INV-2026-00043".to_string(),
+        destination_wallet: transfer_payload.to_address.clone(),
+        token_mint: None,
+        amount: 25_000_000,
+        customer_wallet: Some(transfer_payload.from_address.clone()),
+        expires_at: None,
+        merchant_metadata: None,
+    };
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/checkout/sessions")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&checkout_payload).unwrap(),
+        ))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let session: CheckoutSession = serde_json::from_slice(&body_bytes).unwrap();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/checkout/sessions/{}/submit-transfer", session.id))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&transfer_payload).unwrap(),
+        ))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_transfer_audit_report_returns_compliance_summary() {
+    let state = create_test_state();
+    let router = create_router(state);
+    let payload = create_signed_transfer_request(0, 88, 1_000_000);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/transfer-requests")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let transfer: TransferRequest = serde_json::from_slice(&body_bytes).unwrap();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/transfer-requests/{}/audit-report", transfer.id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let report: TransferAuditReport = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(report.transfer_id, transfer.id);
+    assert_eq!(report.sender_address, payload.from_address);
+    assert_eq!(report.recipient_address, payload.to_address);
+    assert_eq!(
+        report.final_decision,
+        AuditFinalDecision::ApprovedForSettlement
+    );
+    assert!(report.risk_decision_summary.contains("Approved"));
 }
 
 #[tokio::test]
